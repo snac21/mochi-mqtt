@@ -77,7 +77,7 @@ func (l *UnixSock) Serve(establish EstablishFn) {
 			go func() {
 				err = establish(l.id, conn)
 				if err != nil {
-					l.log.Warn("", "error", err)
+					logEstablishError(l.log, err)
 				}
 			}()
 		}
