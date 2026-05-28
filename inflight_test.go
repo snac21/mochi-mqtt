@@ -5,7 +5,6 @@
 package mqtt
 
 import (
-	"sync/atomic"
 	"testing"
 
 	"github.com/mochi-mqtt/server/v2/packets"
@@ -90,86 +89,86 @@ func TestInflightDelete(t *testing.T) {
 
 func TestResetReceiveQuota(t *testing.T) {
 	i := NewInflights()
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(0), i.MaximumReceiveQuota())
+	require.Equal(t, int32(0), i.ReceiveQuota())
 	i.ResetReceiveQuota(6)
-	require.Equal(t, int32(6), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(6), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(6), i.MaximumReceiveQuota())
+	require.Equal(t, int32(6), i.ReceiveQuota())
 }
 
 func TestReceiveQuota(t *testing.T) {
 	i := NewInflights()
-	i.receiveQuota = 4
-	i.maximumReceiveQuota = 5
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(4), atomic.LoadInt32(&i.receiveQuota))
+	i.receiveQuotaState.value = 4
+	i.receiveQuotaState.maximum = 5
+	require.Equal(t, int32(5), i.MaximumReceiveQuota())
+	require.Equal(t, int32(4), i.ReceiveQuota())
 
 	// Return 1
 	i.IncreaseReceiveQuota()
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(5), i.MaximumReceiveQuota())
+	require.Equal(t, int32(5), i.ReceiveQuota())
 
 	// Try to go over max limit
 	i.IncreaseReceiveQuota()
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(5), i.MaximumReceiveQuota())
+	require.Equal(t, int32(5), i.ReceiveQuota())
 
 	// Reset to max 1
 	i.ResetReceiveQuota(1)
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(1), i.MaximumReceiveQuota())
+	require.Equal(t, int32(1), i.ReceiveQuota())
 
 	// Take 1
 	i.DecreaseReceiveQuota()
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(1), i.MaximumReceiveQuota())
+	require.Equal(t, int32(0), i.ReceiveQuota())
 
 	// Try to go below zero
 	i.DecreaseReceiveQuota()
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.maximumReceiveQuota))
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.receiveQuota))
+	require.Equal(t, int32(1), i.MaximumReceiveQuota())
+	require.Equal(t, int32(0), i.ReceiveQuota())
 }
 
 func TestResetSendQuota(t *testing.T) {
 	i := NewInflights()
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(0), i.MaximumSendQuota())
+	require.Equal(t, int32(0), i.SendQuota())
 	i.ResetSendQuota(6)
-	require.Equal(t, int32(6), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(6), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(6), i.MaximumSendQuota())
+	require.Equal(t, int32(6), i.SendQuota())
 }
 
 func TestSendQuota(t *testing.T) {
 	i := NewInflights()
-	i.sendQuota = 4
-	i.maximumSendQuota = 5
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(4), atomic.LoadInt32(&i.sendQuota))
+	i.sendQuotaState.value = 4
+	i.sendQuotaState.maximum = 5
+	require.Equal(t, int32(5), i.MaximumSendQuota())
+	require.Equal(t, int32(4), i.SendQuota())
 
 	// Return 1
 	i.IncreaseSendQuota()
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(5), i.MaximumSendQuota())
+	require.Equal(t, int32(5), i.SendQuota())
 
 	// Try to go over max limit
 	i.IncreaseSendQuota()
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(5), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(5), i.MaximumSendQuota())
+	require.Equal(t, int32(5), i.SendQuota())
 
 	// Reset to max 1
 	i.ResetSendQuota(1)
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(1), i.MaximumSendQuota())
+	require.Equal(t, int32(1), i.SendQuota())
 
 	// Take 1
 	i.DecreaseSendQuota()
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(1), i.MaximumSendQuota())
+	require.Equal(t, int32(0), i.SendQuota())
 
 	// Try to go below zero
 	i.DecreaseSendQuota()
-	require.Equal(t, int32(1), atomic.LoadInt32(&i.maximumSendQuota))
-	require.Equal(t, int32(0), atomic.LoadInt32(&i.sendQuota))
+	require.Equal(t, int32(1), i.MaximumSendQuota())
+	require.Equal(t, int32(0), i.SendQuota())
 }
 
 func TestNextImmediate(t *testing.T) {

@@ -7,19 +7,72 @@ package mqtt
 import (
 	"sort"
 	"sync"
-	"sync/atomic"
 
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
+// LOCK ORDER: quotaState.Mutex must never be held when acquiring Inflight.RWMutex
+type quotaState struct {
+	sync.Mutex
+	value   int32
+	maximum int32
+}
+
+func (q *quotaState) decrease() (int32, bool) {
+	q.Lock()
+	defer q.Unlock()
+	if q.value <= 0 {
+		return q.value, false
+	}
+	q.value--
+	return q.value, true
+}
+
+func (q *quotaState) increase() (int32, bool) {
+	q.Lock()
+	defer q.Unlock()
+	if q.value >= q.maximum {
+		return q.value, false
+	}
+	q.value++
+	return q.value, true
+}
+
+func (q *quotaState) reset(n int32) {
+	q.set(n, n)
+}
+
+func (q *quotaState) set(value, maximum int32) {
+	q.Lock()
+	defer q.Unlock()
+	q.value = value
+	q.maximum = maximum
+}
+
+func (q *quotaState) current() int32 {
+	q.Lock()
+	defer q.Unlock()
+	return q.value
+}
+
+func (q *quotaState) max() int32 {
+	q.Lock()
+	defer q.Unlock()
+	return q.maximum
+}
+
+func (q *quotaState) snapshot() (int32, int32) {
+	q.Lock()
+	defer q.Unlock()
+	return q.value, q.maximum
+}
+
 // Inflight is a map of InflightMessage keyed on packet id.
 type Inflight struct {
 	sync.RWMutex
-	internal            map[uint16]packets.Packet // internal contains the inflight packets
-	receiveQuota        int32                     // remaining inbound qos quota for flow control
-	sendQuota           int32                     // remaining outbound qos quota for flow control
-	maximumReceiveQuota int32                     // maximum allowed receive quota
-	maximumSendQuota    int32                     // maximum allowed send quota
+	internal          map[uint16]packets.Packet // internal contains the inflight packets
+	receiveQuotaState quotaState
+	sendQuotaState    quotaState
 }
 
 // NewInflights returns a new instance of an Inflight packets map.
@@ -67,6 +120,10 @@ func (i *Inflight) Clone() *Inflight {
 	for k, v := range i.internal {
 		c.internal[k] = v
 	}
+	recv, maxRecv := i.receiveQuotaState.snapshot()
+	send, maxSend := i.sendQuotaState.snapshot()
+	c.receiveQuotaState.set(recv, maxRecv)
+	c.sendQuotaState.set(send, maxSend)
 	return c
 }
 
@@ -93,9 +150,6 @@ func (i *Inflight) GetAll(immediate bool) []packets.Packet {
 // This typically occurs when the quota has been exhausted, and we need to wait until new quota
 // is free to continue sending.
 func (i *Inflight) NextImmediate() (packets.Packet, bool) {
-	i.RLock()
-	defer i.RUnlock()
-
 	m := i.GetAll(true)
 	if len(m) > 0 {
 		return m[0], true
@@ -115,42 +169,66 @@ func (i *Inflight) Delete(id uint16) bool {
 	return ok
 }
 
-// TakeRecieveQuota reduces the receive quota by 1.
+// DecreaseReceiveQuota reduces the receive quota by 1.
 func (i *Inflight) DecreaseReceiveQuota() {
-	if atomic.LoadInt32(&i.receiveQuota) > 0 {
-		atomic.AddInt32(&i.receiveQuota, -1)
-	}
+	i.receiveQuotaState.decrease()
 }
 
-// TakeRecieveQuota increases the receive quota by 1.
+// TryDecreaseReceiveQuota atomically checks and decrements the receive quota.
+// Returns true if the quota was successfully decremented, false if already at zero.
+func (i *Inflight) TryDecreaseReceiveQuota() bool {
+	_, ok := i.receiveQuotaState.decrease()
+	return ok
+}
+
+// IncreaseReceiveQuota increases the receive quota by 1.
 func (i *Inflight) IncreaseReceiveQuota() {
-	if atomic.LoadInt32(&i.receiveQuota) < atomic.LoadInt32(&i.maximumReceiveQuota) {
-		atomic.AddInt32(&i.receiveQuota, 1)
-	}
+	i.receiveQuotaState.increase()
 }
 
 // ResetReceiveQuota resets the receive quota to the maximum allowed value.
 func (i *Inflight) ResetReceiveQuota(n int32) {
-	atomic.StoreInt32(&i.receiveQuota, n)
-	atomic.StoreInt32(&i.maximumReceiveQuota, n)
+	i.receiveQuotaState.reset(n)
+}
+
+// ReceiveQuota returns the remaining receive quota.
+func (i *Inflight) ReceiveQuota() int32 {
+	return i.receiveQuotaState.current()
+}
+
+// MaximumReceiveQuota returns the maximum receive quota.
+func (i *Inflight) MaximumReceiveQuota() int32 {
+	return i.receiveQuotaState.max()
 }
 
 // DecreaseSendQuota reduces the send quota by 1.
 func (i *Inflight) DecreaseSendQuota() {
-	if atomic.LoadInt32(&i.sendQuota) > 0 {
-		atomic.AddInt32(&i.sendQuota, -1)
-	}
+	i.sendQuotaState.decrease()
+}
+
+// TryDecreaseSendQuota atomically checks and decrements the send quota.
+// Returns true if the quota was successfully decremented, false if already at zero.
+func (i *Inflight) TryDecreaseSendQuota() bool {
+	_, ok := i.sendQuotaState.decrease()
+	return ok
 }
 
 // IncreaseSendQuota increases the send quota by 1.
 func (i *Inflight) IncreaseSendQuota() {
-	if atomic.LoadInt32(&i.sendQuota) < atomic.LoadInt32(&i.maximumSendQuota) {
-		atomic.AddInt32(&i.sendQuota, 1)
-	}
+	i.sendQuotaState.increase()
 }
 
 // ResetSendQuota resets the send quota to the maximum allowed value.
 func (i *Inflight) ResetSendQuota(n int32) {
-	atomic.StoreInt32(&i.sendQuota, n)
-	atomic.StoreInt32(&i.maximumSendQuota, n)
+	i.sendQuotaState.reset(n)
+}
+
+// SendQuota returns the remaining send quota.
+func (i *Inflight) SendQuota() int32 {
+	return i.sendQuotaState.current()
+}
+
+// MaximumSendQuota returns the maximum send quota.
+func (i *Inflight) MaximumSendQuota() int32 {
+	return i.sendQuotaState.max()
 }
