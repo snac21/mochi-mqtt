@@ -1498,7 +1498,7 @@ func TestServerProcessPacketAndNextImmediate(t *testing.T) {
 	cl.State.Inflight.Set(next)
 	atomic.StoreInt64(&s.Info.Inflight, 1)
 	require.Equal(t, int64(1), atomic.LoadInt64(&s.Info.Inflight))
-	require.Equal(t, int32(5), cl.State.Inflight.sendQuota)
+	require.Equal(t, int32(5), cl.State.Inflight.SendQuota())
 
 	go func() {
 		err := s.processPacket(cl, *packets.TPacketData[packets.Publish].Get(packets.TPublishBasic).Packet)
@@ -1510,7 +1510,7 @@ func TestServerProcessPacketAndNextImmediate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, packets.TPacketData[packets.Publish].Get(packets.TPublishQos1).RawBytes, buf)
 	require.Equal(t, int64(0), atomic.LoadInt64(&s.Info.Inflight))
-	require.Equal(t, int32(4), cl.State.Inflight.sendQuota)
+	require.Equal(t, int32(4), cl.State.Inflight.SendQuota())
 }
 
 func TestServerProcessPublishAckFailure(t *testing.T) {
@@ -2115,12 +2115,12 @@ func TestPublishToClientExceedClientWritesPending(t *testing.T) {
 	_, err := s.publishToClient(cl, packets.Subscription{Filter: "a/b/c", Qos: 2}, packets.Packet{})
 	require.Error(t, err)
 	require.ErrorIs(t, packets.ErrPendingClientWritesExceeded, err)
-	require.Equal(t, int32(sendQuota), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+	require.Equal(t, int32(sendQuota), cl.State.Inflight.SendQuota())
 
 	_, err = s.publishToClient(cl, packets.Subscription{Filter: "a/b/c", Qos: 2}, packets.Packet{FixedHeader: packets.FixedHeader{Qos: 1}})
 	require.Error(t, err)
 	require.ErrorIs(t, packets.ErrPendingClientWritesExceeded, err)
-	require.Equal(t, int32(sendQuota), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+	require.Equal(t, int32(sendQuota), cl.State.Inflight.SendQuota())
 }
 
 func TestPublishToClientServerTopicAlias(t *testing.T) {
@@ -2259,7 +2259,7 @@ func TestPublishToSubscribersExhaustedSendQuota(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	cl.State.Inflight.sendQuota = 0
+	cl.State.Inflight.sendQuotaState.value = 0
 
 	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
 	require.True(t, subbed)
@@ -2414,8 +2414,8 @@ func TestServerProcessPacketPuback(t *testing.T) {
 			pID := uint16(7)
 			s := newServer()
 			cl, _, _ := newTestClient()
-			cl.State.Inflight.sendQuota = 3
-			cl.State.Inflight.receiveQuota = 3
+			cl.State.Inflight.sendQuotaState.value = 3
+			cl.State.Inflight.receiveQuotaState.value = 3
 
 			cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 			atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2423,8 +2423,8 @@ func TestServerProcessPacketPuback(t *testing.T) {
 			err := s.processPacket(cl, *tx.in.Packet)
 			require.NoError(t, err)
 
-			require.Equal(t, int32(4), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
-			require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
+			require.Equal(t, int32(4), cl.State.Inflight.SendQuota())
+			require.Equal(t, int32(3), cl.State.Inflight.ReceiveQuota())
 
 			require.Equal(t, int64(0), atomic.LoadInt64(&s.Info.Inflight))
 			_, ok := cl.State.Inflight.Get(pID)
@@ -2436,23 +2436,23 @@ func TestServerProcessPacketPuback(t *testing.T) {
 func TestServerProcessPacketPubackNoPacketID(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 
 	pk := *packets.TPacketData[packets.Puback].Get(packets.TPuback).Packet
 	err := s.processPacket(cl, pk)
 	require.NoError(t, err)
 
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
+	require.Equal(t, int32(3), cl.State.Inflight.SendQuota())
+	require.Equal(t, int32(3), cl.State.Inflight.ReceiveQuota())
 }
 
 func TestServerProcessPacketPubrec(t *testing.T) {
 	pID := uint16(7)
 	s := newServer()
 	cl, r, w := newTestClient()
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 
 	cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 	atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2470,8 +2470,8 @@ func TestServerProcessPacketPubrec(t *testing.T) {
 
 	require.Equal(t, packets.TPacketData[packets.Pubrel].Get(packets.TPubrel).RawBytes, <-recv)
 
-	require.Equal(t, int32(2), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+	require.Equal(t, int32(2), cl.State.Inflight.ReceiveQuota())
+	require.Equal(t, int32(3), cl.State.Inflight.SendQuota())
 	require.Equal(t, int64(1), atomic.LoadInt64(&s.Info.Inflight))
 	_, ok := cl.State.Inflight.Get(pID)
 	require.True(t, ok)
@@ -2481,8 +2481,8 @@ func TestServerProcessPacketPubrecNoPacketID(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 5
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 
 	recv := make(chan []byte)
 	go func() { // receive the ack
@@ -2498,8 +2498,8 @@ func TestServerProcessPacketPubrecNoPacketID(t *testing.T) {
 
 	require.Equal(t, packets.TPacketData[packets.Pubrel].Get(packets.TPubrelMqtt5AckNoPacket).RawBytes, <-recv)
 
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
+	require.Equal(t, int32(3), cl.State.Inflight.SendQuota())
+	require.Equal(t, int32(3), cl.State.Inflight.ReceiveQuota())
 }
 
 func TestServerProcessPacketPubrecInvalidReason(t *testing.T) {
@@ -2529,8 +2529,8 @@ func TestServerProcessPacketPubrel(t *testing.T) {
 	pID := uint16(7)
 	s := newServer()
 	cl, r, w := newTestClient()
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 
 	cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 	atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2546,8 +2546,8 @@ func TestServerProcessPacketPubrel(t *testing.T) {
 	require.NoError(t, err)
 	_ = w.Close()
 
-	require.Equal(t, int32(4), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
-	require.Equal(t, int32(4), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+	require.Equal(t, int32(4), cl.State.Inflight.ReceiveQuota())
+	require.Equal(t, int32(4), cl.State.Inflight.SendQuota())
 
 	require.Equal(t, packets.TPacketData[packets.Pubcomp].Get(packets.TPubcomp).RawBytes, <-recv)
 
@@ -2560,8 +2560,8 @@ func TestServerProcessPacketPubrelNoPacketID(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 5
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 
 	recv := make(chan []byte)
 	go func() { // receive the ack
@@ -2577,8 +2577,8 @@ func TestServerProcessPacketPubrelNoPacketID(t *testing.T) {
 
 	require.Equal(t, packets.TPacketData[packets.Pubcomp].Get(packets.TPubcompMqtt5AckNoPacket).RawBytes, <-recv)
 
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
-	require.Equal(t, int32(3), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
+	require.Equal(t, int32(3), cl.State.Inflight.SendQuota())
+	require.Equal(t, int32(3), cl.State.Inflight.ReceiveQuota())
 }
 
 func TestServerProcessPacketPubrelFailure(t *testing.T) {
@@ -2622,8 +2622,8 @@ func TestServerProcessPacketPubcomp(t *testing.T) {
 			s := newServer()
 			cl, _, _ := newTestClient()
 			cl.Properties.ProtocolVersion = tx.protocolVersion
-			cl.State.Inflight.sendQuota = 3
-			cl.State.Inflight.receiveQuota = 3
+			cl.State.Inflight.sendQuotaState.value = 3
+			cl.State.Inflight.receiveQuotaState.value = 3
 
 			cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 			atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2632,8 +2632,8 @@ func TestServerProcessPacketPubcomp(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, int64(0), atomic.LoadInt64(&s.Info.Inflight))
 
-			require.Equal(t, int32(4), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
-			require.Equal(t, int32(4), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+			require.Equal(t, int32(4), cl.State.Inflight.ReceiveQuota())
+			require.Equal(t, int32(4), cl.State.Inflight.SendQuota())
 
 			_, ok := cl.State.Inflight.Get(pID)
 			require.False(t, ok)
@@ -2668,8 +2668,8 @@ func TestServerProcessInboundQos2Flow(t *testing.T) {
 	pID := uint16(7)
 	s := newServer()
 	cl, r, w := newTestClient()
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 
 	for i, tx := range tt {
 		t.Run("qos step"+strconv.Itoa(i), func(t *testing.T) {
@@ -2694,8 +2694,8 @@ func TestServerProcessInboundQos2Flow(t *testing.T) {
 			}
 
 			require.Equal(t, tx.data["inflight"].(int64), atomic.LoadInt64(&s.Info.Inflight))
-			require.Equal(t, tx.data["recvquota"].(int32), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
-			require.Equal(t, tx.data["sendquota"].(int32), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+			require.Equal(t, tx.data["recvquota"].(int32), cl.State.Inflight.ReceiveQuota())
+			require.Equal(t, tx.data["sendquota"].(int32), cl.State.Inflight.SendQuota())
 		})
 	}
 
@@ -2740,8 +2740,8 @@ func TestServerProcessOutboundQos2Flow(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
 	cl.State.packetID = uint32(6)
-	cl.State.Inflight.sendQuota = 3
-	cl.State.Inflight.receiveQuota = 3
+	cl.State.Inflight.sendQuotaState.value = 3
+	cl.State.Inflight.receiveQuotaState.value = 3
 	s.Clients.Add(cl)
 	s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
 
@@ -2773,8 +2773,8 @@ func TestServerProcessOutboundQos2Flow(t *testing.T) {
 			}
 
 			require.Equal(t, tx.data["inflight"].(int64), atomic.LoadInt64(&s.Info.Inflight))
-			require.Equal(t, tx.data["recvquota"].(int32), atomic.LoadInt32(&cl.State.Inflight.receiveQuota))
-			require.Equal(t, tx.data["sendquota"].(int32), atomic.LoadInt32(&cl.State.Inflight.sendQuota))
+			require.Equal(t, tx.data["recvquota"].(int32), cl.State.Inflight.ReceiveQuota())
+			require.Equal(t, tx.data["sendquota"].(int32), cl.State.Inflight.SendQuota())
 		})
 	}
 

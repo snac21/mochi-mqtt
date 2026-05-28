@@ -46,10 +46,10 @@ func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 	})
 
 	cl.ID = "mochi"
-	cl.State.Inflight.maximumSendQuota = 5
-	cl.State.Inflight.sendQuota = 5
-	cl.State.Inflight.maximumReceiveQuota = 10
-	cl.State.Inflight.receiveQuota = 10
+	cl.State.Inflight.sendQuotaState.maximum = 5
+	cl.State.Inflight.sendQuotaState.value = 5
+	cl.State.Inflight.receiveQuotaState.maximum = 10
+	cl.State.Inflight.receiveQuotaState.value = 10
 	cl.Properties.Props.TopicAliasMaximum = 0
 	cl.Properties.Props.RequestResponseInfo = 0x1
 
@@ -178,10 +178,10 @@ func TestClientParseConnect(t *testing.T) {
 	require.Equal(t, pk.Connect.WillQos, cl.Properties.Will.Qos)
 	require.Equal(t, pk.Connect.WillRetain, cl.Properties.Will.Retain)
 	require.Equal(t, uint32(1), cl.Properties.Will.Flag)
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.receiveQuota)
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.maximumReceiveQuota)
-	require.Equal(t, int32(pk.Properties.ReceiveMaximum), cl.State.Inflight.sendQuota)
-	require.Equal(t, int32(pk.Properties.ReceiveMaximum), cl.State.Inflight.maximumSendQuota)
+	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.ReceiveQuota())
+	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.MaximumReceiveQuota())
+	require.Equal(t, int32(pk.Properties.ReceiveMaximum), cl.State.Inflight.SendQuota())
+	require.Equal(t, int32(pk.Properties.ReceiveMaximum), cl.State.Inflight.MaximumSendQuota())
 }
 
 func TestClientParseConnectReceiveMaxExceedMaxInflight(t *testing.T) {
@@ -217,10 +217,10 @@ func TestClientParseConnectReceiveMaxExceedMaxInflight(t *testing.T) {
 	require.Equal(t, pk.Connect.WillQos, cl.Properties.Will.Qos)
 	require.Equal(t, pk.Connect.WillRetain, cl.Properties.Will.Retain)
 	require.Equal(t, uint32(1), cl.Properties.Will.Flag)
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.receiveQuota)
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.maximumReceiveQuota)
-	require.Equal(t, int32(MaxInflight), cl.State.Inflight.sendQuota)
-	require.Equal(t, int32(MaxInflight), cl.State.Inflight.maximumSendQuota)
+	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.ReceiveQuota())
+	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.MaximumReceiveQuota())
+	require.Equal(t, int32(MaxInflight), cl.State.Inflight.SendQuota())
+	require.Equal(t, int32(MaxInflight), cl.State.Inflight.MaximumSendQuota())
 }
 
 func TestClientParseConnectOverrideWillDelay(t *testing.T) {
@@ -776,10 +776,10 @@ func TestClientWritePacketBuffer(t *testing.T) {
 	})
 
 	cl.ID = "mochi"
-	cl.State.Inflight.maximumSendQuota = 5
-	cl.State.Inflight.sendQuota = 5
-	cl.State.Inflight.maximumReceiveQuota = 10
-	cl.State.Inflight.receiveQuota = 10
+	cl.State.Inflight.sendQuotaState.maximum = 5
+	cl.State.Inflight.sendQuotaState.value = 5
+	cl.State.Inflight.receiveQuotaState.maximum = 10
+	cl.State.Inflight.receiveQuotaState.value = 10
 	cl.Properties.Props.TopicAliasMaximum = 0
 	cl.Properties.Props.RequestResponseInfo = 0x1
 

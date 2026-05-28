@@ -572,7 +572,7 @@ func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 		existing.State.isTakenOver.Store(true)
 		if existing.State.Inflight.Len() > 0 {
 			cl.State.Inflight = existing.State.Inflight.Clone() // [MQTT-3.1.2-5]
-			if cl.State.Inflight.maximumReceiveQuota == 0 && cl.ops.options.Capabilities.ReceiveMaximum != 0 {
+			if cl.State.Inflight.MaximumReceiveQuota() == 0 && cl.ops.options.Capabilities.ReceiveMaximum != 0 {
 				cl.State.Inflight.ResetReceiveQuota(int32(cl.ops.options.Capabilities.ReceiveMaximum)) // server receive max per client
 				cl.State.Inflight.ResetSendQuota(int32(cl.Properties.Props.ReceiveMaximum))            // client receive max
 			}
@@ -716,7 +716,7 @@ func (s *Server) processPacket(cl *Client, pk packets.Packet) error {
 		return err
 	}
 
-	if cl.State.Inflight.Len() > 0 && atomic.LoadInt32(&cl.State.Inflight.sendQuota) > 0 {
+	if cl.State.Inflight.Len() > 0 && cl.State.Inflight.SendQuota() > 0 {
 		next, ok := cl.State.Inflight.NextImmediate()
 		if ok {
 			_ = cl.WritePacket(next)
@@ -860,8 +860,21 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 		return nil
 	}
 
-	if atomic.LoadInt32(&cl.State.Inflight.receiveQuota) == 0 {
+	if cl.State.Inflight.ReceiveQuota() == 0 {
 		return s.DisconnectClient(cl, packets.ErrReceiveMaximum) // ~[MQTT-3.3.4-7] ~[MQTT-3.3.4-8]
+	}
+
+	needsQuota := !cl.Net.Inline && pk.FixedHeader.Qos > 0
+	quotaDecremented := false
+	if needsQuota {
+		cl.State.Inflight.DecreaseReceiveQuota()
+		quotaDecremented = true
+	}
+	restoreQuota := func() {
+		if quotaDecremented {
+			cl.State.Inflight.IncreaseReceiveQuota()
+			quotaDecremented = false
+		}
 	}
 
 	if !cl.Net.Inline && !s.hooks.OnACLCheck(cl, pk.TopicName, true) {
@@ -870,6 +883,7 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 		}
 
 		if cl.Properties.ProtocolVersion != 5 {
+			restoreQuota()
 			return s.DisconnectClient(cl, packets.ErrNotAuthorized)
 		}
 
@@ -878,6 +892,7 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 			ackType = packets.Pubrec
 		}
 
+		restoreQuota()
 		ack := s.buildAck(pk.PacketID, ackType, 0, pk.Properties, packets.ErrNotAuthorized)
 		return cl.WritePacket(ack)
 	}
@@ -914,13 +929,22 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 	if err == nil {
 		pk = pkx
 	} else if errors.Is(err, packets.ErrRejectPacket) {
+		restoreQuota()
 		return nil
 	} else if errors.Is(err, packets.CodeSuccessIgnore) {
 		pk.Ignore = true
-	} else if cl.Properties.ProtocolVersion == 5 && pk.FixedHeader.Qos > 0 && errors.As(err, new(packets.Code)) {
-		err = cl.WritePacket(s.buildAck(pk.PacketID, packets.Puback, 0, pk.Properties, err.(packets.Code)))
-		if err != nil {
-			return err
+	} else if pk.FixedHeader.Qos > 0 && errors.As(err, new(packets.Code)) {
+		restoreQuota()
+		if cl.Properties.ProtocolVersion != 5 {
+			return s.DisconnectClient(cl, err.(packets.Code))
+		}
+		ackType := packets.Puback
+		if pk.FixedHeader.Qos == 2 {
+			ackType = packets.Pubrec
+		}
+		writeErr := cl.WritePacket(s.buildAck(pk.PacketID, ackType, 0, pk.Properties, err.(packets.Code)))
+		if writeErr != nil {
+			return writeErr
 		}
 		return nil
 	}
@@ -933,12 +957,12 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 	// When it publishes a package with a qos > 0, the server treats
 	// the package as qos=0, and the client receives it as qos=1 or 2.
 	if pk.FixedHeader.Qos == 0 || cl.Net.Inline {
+		restoreQuota()
 		s.publishToSubscribers(pk)
 		s.hooks.OnPublished(cl, pk)
 		return nil
 	}
 
-	cl.State.Inflight.DecreaseReceiveQuota()
 	ack := s.buildAck(pk.PacketID, packets.Puback, 0, pk.Properties, packets.QosCodes[pk.FixedHeader.Qos]) // [MQTT-4.3.2-4]
 	if pk.FixedHeader.Qos == 2 {
 		ack = s.buildAck(pk.PacketID, packets.Pubrec, 0, pk.Properties, packets.CodeSuccess) // [MQTT-3.3.4-1] [MQTT-4.3.3-8]
@@ -1078,18 +1102,16 @@ func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packet
 		}
 
 		out.PacketID = uint16(i) // [MQTT-2.2.1-4]
-		sentQuota := atomic.LoadInt32(&cl.State.Inflight.sendQuota)
+
+		if !cl.State.Inflight.TryDecreaseSendQuota() && cl.State.Inflight.MaximumSendQuota() > 0 {
+			out.Expiry = -1
+			cl.State.Inflight.Set(out)
+			return out, nil
+		}
 
 		if ok := cl.State.Inflight.Set(out); ok { // [MQTT-4.3.2-3] [MQTT-4.3.3-3]
 			atomic.AddInt64(&s.Info.Inflight, 1)
 			s.hooks.OnQosPublish(cl, out, out.Created, 0)
-			cl.State.Inflight.DecreaseSendQuota()
-		}
-
-		if sentQuota == 0 && atomic.LoadInt32(&cl.State.Inflight.maximumSendQuota) > 0 {
-			out.Expiry = -1
-			cl.State.Inflight.Set(out)
-			return out, nil
 		}
 	}
 
