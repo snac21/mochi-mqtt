@@ -925,6 +925,14 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 	if err == nil {
 		pk = pkx
 	} else if errors.Is(err, packets.ErrRejectPacket) {
+		if pk.FixedHeader.Qos > 0 {
+			ackType := packets.Puback
+			if pk.FixedHeader.Qos == 2 {
+				ackType = packets.Pubrec
+			}
+			ack := s.buildAck(pk.PacketID, ackType, 0, pk.Properties, packets.ErrNotAuthorized)
+			_ = cl.WritePacket(ack)
+		}
 		return nil
 	} else if errors.Is(err, packets.CodeSuccessIgnore) {
 		pk.Ignore = true
