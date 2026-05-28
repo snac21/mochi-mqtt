@@ -561,15 +561,28 @@ func (s *Server) validateConnect(cl *Client, pk packets.Packet) packets.Code {
 // session is abandoned.
 func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 	if existing, ok := s.Clients.Get(cl.ID); ok {
+		existing.State.isTakenOver.Store(true)                                                          // must precede DisconnectClient to prevent Read goroutine from deleting new client [#483]
 		_ = s.DisconnectClient(existing, packets.ErrSessionTakenOver)                                   // [MQTT-3.1.4-3]
 		if pk.Connect.Clean || (existing.Properties.Clean && existing.Properties.ProtocolVersion < 5) { // [MQTT-3.1.2-4] [MQTT-3.1.4-4]
-			s.UnsubscribeClient(existing)
+			// UnsubscribeClient returns early when isTakenOver is true, so inline the full unsubscribe.
+			i := 0
+			filterMap := existing.State.Subscriptions.GetAll()
+			filters := make([]packets.Subscription, len(filterMap))
+			for k := range filterMap {
+				existing.State.Subscriptions.Delete(k)
+			}
+			for k, v := range filterMap {
+				if s.Topics.Unsubscribe(k, existing.ID) {
+					atomic.AddInt64(&s.Info.Subscriptions, -1)
+				}
+				filters[i] = v
+				i++
+			}
+			s.hooks.OnUnsubscribed(existing, packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Unsubscribe}, Filters: filters})
 			existing.ClearInflights()
-			existing.State.isTakenOver.Store(true) // only set isTakenOver after unsubscribe has occurred
-			return false                           // [MQTT-3.2.2-3]
+			return false // [MQTT-3.2.2-3]
 		}
 
-		existing.State.isTakenOver.Store(true)
 		if existing.State.Inflight.Len() > 0 {
 			cl.State.Inflight = existing.State.Inflight.Clone() // [MQTT-3.1.2-5]
 			if cl.State.Inflight.MaximumReceiveQuota() == 0 && cl.ops.options.Capabilities.ReceiveMaximum != 0 {
