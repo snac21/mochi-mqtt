@@ -120,22 +120,26 @@ func MatchTopic(filter string, topic string) (elements []string, matched bool) {
 
 // Ledger is an auth ledger containing access rules for users and topics.
 type Ledger struct {
-	sync.Mutex `json:"-" yaml:"-"`
-	Users      Users     `json:"users" yaml:"users"`
-	Auth       AuthRules `json:"auth" yaml:"auth"`
-	ACL        ACLRules  `json:"acl" yaml:"acl"`
+	sync.RWMutex `json:"-" yaml:"-"`
+	Users        Users     `json:"users" yaml:"users"`
+	Auth         AuthRules `json:"auth" yaml:"auth"`
+	ACL          ACLRules  `json:"acl" yaml:"acl"`
 }
 
 // Update updates the internal values of the ledger.
 func (l *Ledger) Update(ln *Ledger) {
 	l.Lock()
 	defer l.Unlock()
+	l.Users = ln.Users
 	l.Auth = ln.Auth
 	l.ACL = ln.ACL
 }
 
 // AuthOk returns true if the rules indicate the user is allowed to authenticate.
 func (l *Ledger) AuthOk(cl *mqtt.Client, pk packets.Packet) (n int, ok bool) {
+	l.RLock()
+	defer l.RUnlock()
+
 	// If the users map is set, always check for a predefined user first instead
 	// of iterating through global rules.
 	if l.Users != nil {
@@ -163,6 +167,9 @@ func (l *Ledger) AuthOk(cl *mqtt.Client, pk packets.Packet) (n int, ok bool) {
 // ACLOk returns true if the rules indicate the user is allowed to read or write to
 // a specific filter or topic respectively, based on the `write` bool.
 func (l *Ledger) ACLOk(cl *mqtt.Client, topic string, write bool) (n int, ok bool) {
+	l.RLock()
+	defer l.RUnlock()
+
 	// If the users map is set, always check for a predefined user first instead
 	// of iterating through global rules.
 	if l.Users != nil {
@@ -222,11 +229,15 @@ func (l *Ledger) ACLOk(cl *mqtt.Client, topic string, write bool) (n int, ok boo
 
 // ToJSON encodes the values into a JSON string.
 func (l *Ledger) ToJSON() (data []byte, err error) {
+	l.RLock()
+	defer l.RUnlock()
 	return json.Marshal(l)
 }
 
 // ToYAML encodes the values into a YAML string.
 func (l *Ledger) ToYAML() (data []byte, err error) {
+	l.RLock()
+	defer l.RUnlock()
 	return yaml.Marshal(l)
 }
 
