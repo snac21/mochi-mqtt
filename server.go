@@ -1071,7 +1071,7 @@ func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packet
 
 	if cl.Properties.Props.TopicAliasMaximum > 0 {
 		var aliasExists bool
-		out.Properties.TopicAlias, aliasExists = cl.State.TopicAliases.Outbound.Set(pk.TopicName)
+		out.Properties.TopicAlias, aliasExists = cl.State.TopicAliases.Outbound.Set(out.TopicName)
 		if out.Properties.TopicAlias > 0 {
 			out.Properties.TopicAliasFlag = true
 			if aliasExists {
