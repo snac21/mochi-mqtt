@@ -864,17 +864,15 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 		return s.DisconnectClient(cl, packets.ErrReceiveMaximum) // ~[MQTT-3.3.4-7] ~[MQTT-3.3.4-8]
 	}
 
-	needsQuota := !cl.Net.Inline && pk.FixedHeader.Qos > 0
-	quotaDecremented := false
-	if needsQuota {
+	restoreReceiveQuota := false
+	if !cl.Net.Inline && pk.FixedHeader.Qos > 0 {
 		cl.State.Inflight.DecreaseReceiveQuota()
-		quotaDecremented = true
-	}
-	restoreQuota := func() {
-		if quotaDecremented {
-			cl.State.Inflight.IncreaseReceiveQuota()
-			quotaDecremented = false
-		}
+		restoreReceiveQuota = true
+		defer func() {
+			if restoreReceiveQuota {
+				cl.State.Inflight.IncreaseReceiveQuota()
+			}
+		}()
 	}
 
 	if !cl.Net.Inline && !s.hooks.OnACLCheck(cl, pk.TopicName, true) {
@@ -883,7 +881,6 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 		}
 
 		if cl.Properties.ProtocolVersion != 5 {
-			restoreQuota()
 			return s.DisconnectClient(cl, packets.ErrNotAuthorized)
 		}
 
@@ -892,7 +889,6 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 			ackType = packets.Pubrec
 		}
 
-		restoreQuota()
 		ack := s.buildAck(pk.PacketID, ackType, 0, pk.Properties, packets.ErrNotAuthorized)
 		return cl.WritePacket(ack)
 	}
@@ -929,12 +925,10 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 	if err == nil {
 		pk = pkx
 	} else if errors.Is(err, packets.ErrRejectPacket) {
-		restoreQuota()
 		return nil
 	} else if errors.Is(err, packets.CodeSuccessIgnore) {
 		pk.Ignore = true
 	} else if pk.FixedHeader.Qos > 0 && errors.As(err, new(packets.Code)) {
-		restoreQuota()
 		if cl.Properties.ProtocolVersion != 5 {
 			return s.DisconnectClient(cl, err.(packets.Code))
 		}
@@ -957,11 +951,12 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 	// When it publishes a package with a qos > 0, the server treats
 	// the package as qos=0, and the client receives it as qos=1 or 2.
 	if pk.FixedHeader.Qos == 0 || cl.Net.Inline {
-		restoreQuota()
 		s.publishToSubscribers(pk)
 		s.hooks.OnPublished(cl, pk)
 		return nil
 	}
+
+	restoreReceiveQuota = false
 
 	ack := s.buildAck(pk.PacketID, packets.Puback, 0, pk.Properties, packets.QosCodes[pk.FixedHeader.Qos]) // [MQTT-4.3.2-4]
 	if pk.FixedHeader.Qos == 2 {
