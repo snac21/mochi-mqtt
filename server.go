@@ -654,6 +654,10 @@ func (s *Server) SendConnack(cl *Client, reason packets.Code, present bool, prop
 		properties.MaximumQosFlag = true
 	}
 
+	if s.Options.Capabilities.MaximumPacketSize > 0 {
+		properties.MaximumPacketSize = s.Options.Capabilities.MaximumPacketSize // [MQTT-3.2.2-15]
+	}
+
 	if cl.Properties.Props.AssignedClientID != "" {
 		properties.AssignedClientID = cl.Properties.Props.AssignedClientID // [MQTT-3.1.3-7] [MQTT-3.2.2-16]
 	}
