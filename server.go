@@ -6,6 +6,7 @@
 package mqtt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -18,10 +19,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cloudwego/netpoll"
 	"github.com/mochi-mqtt/server/v2/hooks/storage"
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/mochi-mqtt/server/v2/system"
+	"github.com/mochi-mqtt/server/v2/transport"
 
 	"log/slog"
 )
@@ -260,12 +263,32 @@ func (s *Server) NewClient(c net.Conn, listener string, id string, inline bool) 
 	return cl
 }
 
+func (s *Server) NewNetpollClient(c netpoll.Connection, listener string, id string, inline bool) *Client {
+	cl := newNetpollClient(c, &ops{
+		options: s.Options,
+		info:    s.Info,
+		hooks:   s.hooks,
+		log:     s.Log,
+	})
+
+	cl.ID = id
+	cl.Net.Listener = listener
+
+	if inline {
+		cl.Net.Inline = true
+		cl.State.Inflight.ResetReceiveQuota(math.MaxInt32)
+	}
+
+	return cl
+}
+
 // AddHook attaches a new Hook to the server. Ideally, this should be called
 // before the server is started with s.Serve().
 func (s *Server) AddHook(hook Hook, config any) error {
 	nl := s.Log.With("hook", hook.ID())
 	hook.SetOpts(nl, &HookOptions{
 		Capabilities: s.Options.Capabilities,
+		Server:       s,
 	})
 
 	s.Log.Info("added hook", "hook", hook.ID())
@@ -309,6 +332,8 @@ func (s *Server) AddListenersFromConfig(configs []listeners.Config) error {
 		switch strings.ToLower(conf.Type) {
 		case listeners.TypeTCP:
 			l = listeners.NewTCP(conf)
+		case listeners.TypeNetpoll:
+			l = listeners.NewNetpoll(conf)
 		case listeners.TypeWS:
 			l = listeners.NewWebsocket(conf)
 		case listeners.TypeUnix:
@@ -397,6 +422,9 @@ func (s *Server) eventLoop() {
 
 // EstablishConnection establishes a new client when a listener accepts a new connection.
 func (s *Server) EstablishConnection(listener string, c net.Conn) error {
+	if npc, ok := c.(netpoll.Connection); ok {
+		return s.EstablishNetpollConnection(listener, npc)
+	}
 	cl := s.NewClient(c, listener, "", false)
 	return s.attachClient(cl, listener)
 }
@@ -561,28 +589,15 @@ func (s *Server) validateConnect(cl *Client, pk packets.Packet) packets.Code {
 // session is abandoned.
 func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 	if existing, ok := s.Clients.Get(cl.ID); ok {
-		existing.State.isTakenOver.Store(true)                                                          // must precede DisconnectClient to prevent Read goroutine from deleting new client [#483]
 		_ = s.DisconnectClient(existing, packets.ErrSessionTakenOver)                                   // [MQTT-3.1.4-3]
 		if pk.Connect.Clean || (existing.Properties.Clean && existing.Properties.ProtocolVersion < 5) { // [MQTT-3.1.2-4] [MQTT-3.1.4-4]
-			// UnsubscribeClient returns early when isTakenOver is true, so inline the full unsubscribe.
-			i := 0
-			filterMap := existing.State.Subscriptions.GetAll()
-			filters := make([]packets.Subscription, len(filterMap))
-			for k := range filterMap {
-				existing.State.Subscriptions.Delete(k)
-			}
-			for k, v := range filterMap {
-				if s.Topics.Unsubscribe(k, existing.ID) {
-					atomic.AddInt64(&s.Info.Subscriptions, -1)
-				}
-				filters[i] = v
-				i++
-			}
-			s.hooks.OnUnsubscribed(existing, packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Unsubscribe}, Filters: filters})
+			s.UnsubscribeClient(existing)
 			existing.ClearInflights()
-			return false // [MQTT-3.2.2-3]
+			existing.State.isTakenOver.Store(true) // only set isTakenOver after unsubscribe has occurred
+			return false                           // [MQTT-3.2.2-3]
 		}
 
+		existing.State.isTakenOver.Store(true)
 		if existing.State.Inflight.Len() > 0 {
 			cl.State.Inflight = existing.State.Inflight.Clone() // [MQTT-3.1.2-5]
 			if cl.State.Inflight.MaximumReceiveQuota() == 0 && cl.ops.options.Capabilities.ReceiveMaximum != 0 {
@@ -625,7 +640,11 @@ func (s *Server) SendConnack(cl *Client, reason packets.Code, present bool, prop
 	}
 
 	properties.ReceiveMaximum = s.Options.Capabilities.ReceiveMaximum // 3.2.2.3.3 Receive Maximum
-	if cl.State.ServerKeepalive {                                     // You can set this dynamically using the OnConnect hook.
+	if s.Options.Capabilities.MaximumPacketSize > 0 {
+		properties.MaximumPacketSize = s.Options.Capabilities.MaximumPacketSize
+	}
+
+	if cl.State.ServerKeepalive { // You can set this dynamically using the OnConnect hook.
 		properties.ServerKeepAlive = cl.State.Keepalive // [MQTT-3.1.2-21]
 		properties.ServerKeepAliveFlag = true
 	}
@@ -652,10 +671,6 @@ func (s *Server) SendConnack(cl *Client, reason packets.Code, present bool, prop
 	if s.Options.Capabilities.MaximumQos < 2 {
 		properties.MaximumQos = s.Options.Capabilities.MaximumQos // [MQTT-3.2.2-9]
 		properties.MaximumQosFlag = true
-	}
-
-	if s.Options.Capabilities.MaximumPacketSize > 0 {
-		properties.MaximumPacketSize = s.Options.Capabilities.MaximumPacketSize // [MQTT-3.2.2-15]
 	}
 
 	if cl.Properties.Props.AssignedClientID != "" {
@@ -881,8 +896,9 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 		return s.DisconnectClient(cl, packets.ErrReceiveMaximum) // ~[MQTT-3.3.4-7] ~[MQTT-3.3.4-8]
 	}
 
+	// Decrement receive quota for QoS > 0 messages before any rejection paths [MQTT-3.3.4]
 	restoreReceiveQuota := false
-	if !cl.Net.Inline && pk.FixedHeader.Qos > 0 {
+	if pk.FixedHeader.Qos > 0 {
 		cl.State.Inflight.DecreaseReceiveQuota()
 		restoreReceiveQuota = true
 		defer func() {
@@ -941,30 +957,32 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 	pkx, err := s.hooks.OnPublish(cl, pk)
 	if err == nil {
 		pk = pkx
-	} else if errors.Is(err, packets.ErrRejectPacket) {
-		if pk.FixedHeader.Qos > 0 {
-			ackType := packets.Puback
-			if pk.FixedHeader.Qos == 2 {
-				ackType = packets.Pubrec
-			}
-			ack := s.buildAck(pk.PacketID, ackType, 0, pk.Properties, packets.ErrNotAuthorized)
-			_ = cl.WritePacket(ack)
-		}
-		return nil
 	} else if errors.Is(err, packets.CodeSuccessIgnore) {
 		pk.Ignore = true
-	} else if pk.FixedHeader.Qos > 0 && errors.As(err, new(packets.Code)) {
-		if cl.Properties.ProtocolVersion != 5 {
-			return s.DisconnectClient(cl, err.(packets.Code))
+	} else {
+		var code packets.Code
+		if !errors.As(err, &code) {
+			return err
 		}
+
+		if pk.FixedHeader.Qos == 0 {
+			return nil
+		}
+
+		if cl.Properties.ProtocolVersion != 5 {
+			return s.DisconnectClient(cl, code) // [MQTT-3.3.5-2]
+		}
+
 		ackType := packets.Puback
 		if pk.FixedHeader.Qos == 2 {
 			ackType = packets.Pubrec
 		}
-		writeErr := cl.WritePacket(s.buildAck(pk.PacketID, ackType, 0, pk.Properties, err.(packets.Code)))
-		if writeErr != nil {
-			return writeErr
+
+		err = cl.WritePacket(s.buildAck(pk.PacketID, ackType, 0, pk.Properties, code))
+		if err != nil {
+			return err
 		}
+
 		return nil
 	}
 
@@ -980,8 +998,6 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 		s.hooks.OnPublished(cl, pk)
 		return nil
 	}
-
-	restoreReceiveQuota = false
 
 	ack := s.buildAck(pk.PacketID, packets.Puback, 0, pk.Properties, packets.CodeSuccess) // [MQTT-4.3.2-4]
 	if pk.FixedHeader.Qos == 2 {
@@ -1003,11 +1019,16 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 			atomic.AddInt64(&s.Info.Inflight, -1)
 		}
 		cl.State.Inflight.IncreaseReceiveQuota()
+		restoreReceiveQuota = false
 		s.hooks.OnQosComplete(cl, ack)
 	}
 
 	s.publishToSubscribers(pk)
 	s.hooks.OnPublished(cl, pk)
+
+	if pk.FixedHeader.Qos == 2 {
+		restoreReceiveQuota = false
+	}
 
 	return nil
 }
@@ -1022,7 +1043,7 @@ func (s *Server) retainMessage(cl *Client, pk packets.Packet) {
 	out := pk.Copy(false)
 	r := s.Topics.RetainMessage(out)
 	s.hooks.OnRetainMessage(cl, pk, r)
-	atomic.StoreInt64(&s.Info.Retained, int64(s.Topics.Retained.Len()))
+	atomic.StoreInt64(&s.Info.Retained, int64(s.Topics.RetainedLen()))
 }
 
 // publishToSubscribers publishes a publish packet to all subscribers with matching topic filters.
@@ -1090,69 +1111,7 @@ func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packet
 		out.FixedHeader.Qos = sub.Qos
 	}
 
-	if out.FixedHeader.Qos > s.Options.Capabilities.MaximumQos {
-		out.FixedHeader.Qos = s.Options.Capabilities.MaximumQos // [MQTT-3.2.2-9]
-	}
-
-	if cl.Properties.Props.TopicAliasMaximum > 0 {
-		var aliasExists bool
-		out.Properties.TopicAlias, aliasExists = cl.State.TopicAliases.Outbound.Set(out.TopicName)
-		if out.Properties.TopicAlias > 0 {
-			out.Properties.TopicAliasFlag = true
-			if aliasExists {
-				out.TopicName = ""
-			}
-		}
-	}
-
-	if out.FixedHeader.Qos > 0 {
-		if cl.State.Inflight.Len() >= int(s.Options.Capabilities.MaximumInflight) {
-			// add hook?
-			atomic.AddInt64(&s.Info.InflightDropped, 1)
-			s.Log.Warn("client store quota reached", "client", cl.ID, "listener", cl.Net.Listener)
-			return out, packets.ErrQuotaExceeded
-		}
-
-		i, err := cl.NextPacketID() // [MQTT-4.3.2-1] [MQTT-4.3.3-1]
-		if err != nil {
-			s.hooks.OnPacketIDExhausted(cl, pk)
-			atomic.AddInt64(&s.Info.InflightDropped, 1)
-			s.Log.Warn("packet ids exhausted", "error", err, "client", cl.ID, "listener", cl.Net.Listener)
-			return out, packets.ErrQuotaExceeded
-		}
-
-		out.PacketID = uint16(i) // [MQTT-2.2.1-4]
-
-		if !cl.State.Inflight.TryDecreaseSendQuota() && cl.State.Inflight.MaximumSendQuota() > 0 {
-			out.Expiry = -1
-			cl.State.Inflight.Set(out)
-			return out, nil
-		}
-
-		if ok := cl.State.Inflight.Set(out); ok { // [MQTT-4.3.2-3] [MQTT-4.3.3-3]
-			atomic.AddInt64(&s.Info.Inflight, 1)
-			s.hooks.OnQosPublish(cl, out, out.Created, 0)
-		}
-	}
-
-	if cl.Net.Conn == nil || cl.Closed() {
-		return out, packets.CodeDisconnect
-	}
-
-	select {
-	case cl.State.outbound <- &out:
-		atomic.AddInt32(&cl.State.outboundQty, 1)
-	default:
-		atomic.AddInt64(&s.Info.MessagesDropped, 1)
-		cl.ops.hooks.OnPublishDropped(cl, pk)
-		if out.FixedHeader.Qos > 0 {
-			cl.State.Inflight.Delete(out.PacketID) // packet was dropped due to irregular circumstances, so rollback inflight.
-			cl.State.Inflight.IncreaseSendQuota()
-		}
-		return out, packets.ErrPendingClientWritesExceeded
-	}
-
-	return out, nil
+	return s.enqueuePublishToClient(cl, out, pk)
 }
 
 func (s *Server) publishRetainedToClient(cl *Client, sub packets.Subscription, existed bool) {
@@ -1172,6 +1131,131 @@ func (s *Server) publishRetainedToClient(cl *Client, sub packets.Subscription, e
 			continue
 		}
 		s.hooks.OnRetainPublished(cl, pkv)
+	}
+}
+
+func (s *Server) enqueuePublishToClient(cl *Client, out packets.Packet, source packets.Packet) (packets.Packet, error) {
+	if out.FixedHeader.Qos > s.Options.Capabilities.MaximumQos {
+		out.FixedHeader.Qos = s.Options.Capabilities.MaximumQos // [MQTT-3.2.2-9]
+	}
+
+	if cl.Properties.Props.TopicAliasMaximum > 0 {
+		var aliasExists bool
+		out.Properties.TopicAlias, aliasExists = cl.State.TopicAliases.Outbound.Set(out.TopicName)
+		if out.Properties.TopicAlias > 0 {
+			out.Properties.TopicAliasFlag = true
+			if aliasExists {
+				out.TopicName = ""
+			}
+		}
+	}
+
+	if out.FixedHeader.Qos > 0 {
+		if cl.State.Inflight.Len() >= int(s.Options.Capabilities.MaximumInflight) {
+			atomic.AddInt64(&s.Info.InflightDropped, 1)
+			s.Log.Warn("client store quota reached", "client", cl.ID, "listener", cl.Net.Listener)
+			return out, packets.ErrQuotaExceeded
+		}
+
+		i, err := cl.NextPacketID() // [MQTT-4.3.2-1] [MQTT-4.3.3-1]
+		if err != nil {
+			s.hooks.OnPacketIDExhausted(cl, source)
+			atomic.AddInt64(&s.Info.InflightDropped, 1)
+			s.Log.Warn("packet ids exhausted", "error", err, "client", cl.ID, "listener", cl.Net.Listener)
+			return out, packets.ErrQuotaExceeded
+		}
+
+		out.PacketID = uint16(i) // [MQTT-2.2.1-4]
+		sentQuota := cl.State.Inflight.SendQuota()
+
+		if ok := cl.State.Inflight.Set(out); ok { // [MQTT-4.3.2-3] [MQTT-4.3.3-3]
+			atomic.AddInt64(&s.Info.Inflight, 1)
+			s.hooks.OnQosPublish(cl, out, out.Created, 0)
+			cl.State.Inflight.DecreaseSendQuota()
+		}
+
+		if sentQuota == 0 && cl.State.Inflight.MaximumSendQuota() > 0 {
+			out.Expiry = -1
+			cl.State.Inflight.Set(out)
+			return out, nil
+		}
+	}
+
+	if cl.Closed() || cl.Net.Transport == nil {
+		return out, packets.CodeDisconnect
+	}
+
+	_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
+	if isNetpoll {
+		err := cl.WritePacket(out)
+		if err != nil {
+			atomic.AddInt64(&s.Info.MessagesDropped, 1)
+			cl.ops.hooks.OnPublishDropped(cl, source)
+			if out.FixedHeader.Qos > 0 {
+				cl.State.Inflight.Delete(out.PacketID)
+				cl.State.Inflight.IncreaseSendQuota()
+			}
+			return out, err
+		}
+		return out, nil
+	}
+
+	select {
+	case cl.State.outbound <- &out:
+		atomic.AddInt32(&cl.State.outboundQty, 1)
+	default:
+		atomic.AddInt64(&s.Info.MessagesDropped, 1)
+		cl.ops.hooks.OnPublishDropped(cl, source)
+		if out.FixedHeader.Qos > 0 {
+			cl.State.Inflight.Delete(out.PacketID)
+			cl.State.Inflight.IncreaseSendQuota()
+		}
+		return out, packets.ErrPendingClientWritesExceeded
+	}
+
+	return out, nil
+}
+
+// sendQueuedMessages attempts to send queued messages (Expiry = -1) that were waiting for quota.
+func (s *Server) sendQueuedMessages(cl *Client) {
+	for {
+		// Check send quota limit, stop sending if quota is exhausted
+		if cl.State.Inflight.MaximumSendQuota() > 0 && cl.State.Inflight.SendQuota() <= 0 {
+			return
+		}
+
+		pk, ok := cl.State.Inflight.NextImmediate()
+		if !ok {
+			return // No more queued messages
+		}
+
+		// Mark as ready to send by clearing the -1 flag
+		pk.Expiry = time.Now().Unix() + s.Options.Capabilities.MaximumMessageExpiryInterval
+		cl.State.Inflight.Set(pk)
+		cl.State.Inflight.DecreaseSendQuota() // Decrement quota
+
+		_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
+		if isNetpoll {
+			if err := cl.WritePacket(pk); err != nil {
+				// Send failed, restore quota and set message back to queued state
+				cl.State.Inflight.IncreaseSendQuota()
+				pk.Expiry = -1
+				cl.State.Inflight.Set(pk)
+				return
+			}
+			continue
+		}
+
+		// Send to outbound channel
+		select {
+		case cl.State.outbound <- &pk:
+		default:
+			// Outbound channel is full, stop trying, restore quota and set message back to queued state
+			cl.State.Inflight.IncreaseSendQuota()
+			pk.Expiry = -1
+			cl.State.Inflight.Set(pk)
+			return
+		}
 	}
 }
 
@@ -1209,6 +1293,9 @@ func (s *Server) processPuback(cl *Client, pk packets.Packet) error {
 		cl.State.Inflight.IncreaseSendQuota()
 		atomic.AddInt64(&s.Info.Inflight, -1)
 		s.hooks.OnQosComplete(cl, pk)
+
+		// Try to send queued messages now that quota is available
+		s.sendQueuedMessages(cl)
 	}
 
 	return nil
@@ -1275,6 +1362,9 @@ func (s *Server) processPubcomp(cl *Client, pk packets.Packet) error {
 		atomic.AddInt64(&s.Info.Inflight, -1)
 		s.hooks.OnQosComplete(cl, pk)
 	}
+
+	// Try to send queued messages now that quota is available
+	s.sendQueuedMessages(cl)
 
 	return nil
 }
@@ -1447,6 +1537,7 @@ func (s *Server) processDisconnect(cl *Client, pk packets.Packet) error {
 	}
 
 	s.loop.willDelayed.Delete(cl.ID) // [MQTT-3.1.3-9] [MQTT-3.1.2-8]
+	cl.Properties.Will = Will{}      // Clear LWT to prevent execution (Delete Will from server's records) [MQTT-3.14.4-3]
 	cl.Stop(packets.CodeDisconnect)  // [MQTT-3.14.4-2]
 
 	return nil
@@ -1755,21 +1846,11 @@ func (s *Server) clearExpiredClients(dt int64) {
 	}
 }
 
-// clearExpiredRetainedMessage deletes retained messages from topics if they have expired.
+// clearExpiredRetainedMessages deletes retained messages from topics if they have expired.
 func (s *Server) clearExpiredRetainedMessages(now int64) {
-	for filter, pk := range s.Topics.Retained.GetAll() {
-		expired := pk.ProtocolVersion == 5 && pk.Expiry > 0 && pk.Expiry < now // [MQTT-3.3.2-5]
-
-		// If the maximum message expiry interval is set (greater than 0), and the message
-		// retention period exceeds the maximum expiry, the message will be forcibly removed.
-		enforced := s.Options.Capabilities.MaximumMessageExpiryInterval > 0 &&
-			now-pk.Created > s.Options.Capabilities.MaximumMessageExpiryInterval
-
-		if expired || enforced {
-			s.Topics.Retained.Delete(filter)
-			s.hooks.OnRetainedExpired(filter)
-		}
-	}
+	s.Topics.ClearExpiredRetainedMessages(now, s.Options.Capabilities.MaximumMessageExpiryInterval, func(filter string) {
+		s.hooks.OnRetainedExpired(filter)
+	})
 }
 
 // clearExpiredInflights deletes any inflight messages which have expired.
@@ -1820,4 +1901,182 @@ func minimum(a, b int64) (m int64) {
 		m = b
 	}
 	return
+}
+
+var ErrNotEnoughData = errors.New("not enough data")
+
+func (s *Server) EstablishNetpollConnection(listener string, c netpoll.Connection) error {
+	cl := s.NewNetpollClient(c, listener, "", false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cl.State.open = ctx
+	cl.State.cancelOpen = cancel
+
+	// Core Step 1: Register the connection's callback handler in the Netpoll listener's global dispatch center.
+	// This solves the bug where the initial CONNECT readable event is swallowed if data arrives before OnConnect callback completes under rapid localhost connections.
+	if l, ok := s.Listeners.Get(listener); ok {
+		if np, ok := l.(*listeners.Netpoll); ok {
+			np.RegisterOnRequest(c, func(ctx context.Context, connection netpoll.Connection) error {
+				return s.handleNetpollRequest(cl, connection)
+			})
+		}
+	}
+
+	// Core Step 2: Register a connection close callback (AddCloseCallback).
+	// Ensures session expiry and cleanup from the Clients map are reliably triggered when the peer disconnects (whether normal EOF or abnormal hang).
+	// Otherwise, the stale session instance will persist in s.Clients, causing severe deadlocks and connection timeouts on reconnection with the same ClientID.
+	c.AddCloseCallback(func(connection netpoll.Connection) error {
+		// Unregister the connection from the dispatch center
+		if l, ok := s.Listeners.Get(listener); ok {
+			if np, ok := l.(*listeners.Netpoll); ok {
+				np.UnregisterOnRequest(connection)
+			}
+		}
+		cl.Stop(nil)
+		if cl.ID != "" {
+			if atomic.CompareAndSwapUint32(&cl.State.statConnIncrement, 1, 0) {
+				// Fix: only decrement if the connection was successfully established and incremented, preventing double decrementing on auth/establishment failures
+				atomic.AddInt64(&s.Info.ClientsConnected, -1)
+
+				cause := cl.StopCause()
+				// Normal DISCONNECT (or DISCONNECT with LWT) should not trigger LWT
+				if cause == nil || (!errors.Is(cause, packets.CodeDisconnect) && !errors.Is(cause, packets.CodeDisconnectWillMessage)) {
+					s.sendLWT(cl)
+				} else {
+					cl.Properties.Will = Will{}
+				}
+
+				expire := (cl.Properties.ProtocolVersion == 5 && cl.Properties.Props.SessionExpiryInterval == 0) || (cl.Properties.ProtocolVersion < 5 && cl.Properties.Clean)
+				s.hooks.OnDisconnect(cl, cause, expire)
+
+				if expire && !cl.IsTakenOver() {
+					cl.ClearInflights()
+					s.UnsubscribeClient(cl)
+					s.Clients.Delete(cl.ID)
+				}
+			}
+		}
+		return nil
+	})
+
+	return nil
+}
+
+func (s *Server) handleNetpollRequest(cl *Client, c netpoll.Connection) error {
+	defer func() {
+		if r := recover(); r != nil {
+			s.Log.Error("panic in netpoll handleRequest", "recover", r, "client", cl.ID)
+			if cl.ID != "" {
+				s.sendLWT(cl)
+			}
+			cl.Stop(fmt.Errorf("panic in handleNetpollRequest: %v", r))
+		}
+	}()
+
+	if cl.Closed() {
+		return nil
+	}
+
+	reader := c.Reader()
+
+	if cl.ID == "" {
+		if cl.Net.Transport == nil {
+			return transport.ErrConnectionClosed
+		}
+		pk, bytesRead, err := cl.Net.Transport.ReadPacketDirect(cl.Properties.ProtocolVersion, s.Options.Capabilities.MaximumPacketSize)
+		if err != nil {
+			if errors.Is(err, transport.ErrNotEnoughData) {
+				return nil
+			}
+			cl.Stop(err)
+			return err
+		}
+		atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bytesRead))
+
+		cl.ParseConnect(cl.Net.Listener, pk)
+		if atomic.LoadInt64(&s.Info.ClientsConnected) >= s.Options.Capabilities.MaximumClients {
+			code := packets.ErrServerBusy
+			if cl.Properties.ProtocolVersion < 5 {
+				code = packets.ErrServerUnavailable
+			}
+			s.SendConnack(cl, code, false, nil)
+			cl.Stop(packets.ErrServerBusy)
+			return packets.ErrServerBusy
+		}
+
+		code := s.validateConnect(cl, pk)
+		if code != packets.CodeSuccess {
+			s.SendConnack(cl, code, false, nil)
+			cl.Stop(code)
+			return code
+		}
+
+		err = s.hooks.OnConnect(cl, pk)
+		if err != nil {
+			cl.Stop(err)
+			return err
+		}
+
+		cl.refreshDeadline(cl.State.Keepalive)
+		if !s.hooks.OnConnectAuthenticate(cl, pk) {
+			s.SendConnack(cl, packets.ErrBadUsernameOrPassword, false, nil)
+			cl.Stop(packets.ErrBadUsernameOrPassword)
+			return packets.ErrBadUsernameOrPassword
+		}
+
+		atomic.AddInt64(&s.Info.ClientsConnected, 1)
+		atomic.StoreUint32(&cl.State.statConnIncrement, 1)
+
+		s.hooks.OnSessionEstablish(cl, pk)
+		sessionPresent := s.inheritClientSession(pk, cl)
+		s.Clients.Add(cl)
+		s.loop.willDelayed.Delete(cl.ID) // [MQTT-3.1.3-9]
+
+		err = s.SendConnack(cl, code, sessionPresent, nil)
+		if err != nil {
+			cl.Stop(err)
+			return err
+		}
+
+		if sessionPresent {
+			_ = cl.ResendInflightMessages(true)
+		}
+
+		s.hooks.OnSessionEstablished(cl, pk)
+
+		if reader.Len() == 0 {
+			return nil
+		}
+	}
+
+	for reader.Len() > 0 {
+		if cl.Net.Transport == nil {
+			return transport.ErrConnectionClosed
+		}
+		pk, bytesRead, err := cl.Net.Transport.ReadPacketDirect(cl.Properties.ProtocolVersion, s.Options.Capabilities.MaximumPacketSize)
+		if err != nil {
+			if errors.Is(err, transport.ErrNotEnoughData) {
+				return nil
+			}
+			s.sendLWT(cl)
+			cl.Stop(err)
+			return err
+		}
+		atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bytesRead))
+
+		// Refresh Keepalive deadline to ensure it's extended normally under continuous message exchanges
+		cl.refreshDeadline(cl.State.Keepalive)
+
+		pk, err = cl.ops.hooks.OnPacketRead(cl, pk)
+		if err != nil {
+			s.sendLWT(cl)
+			cl.Stop(err)
+			return err
+		}
+		if err := s.receivePacket(cl, pk); err != nil {
+			s.Log.Warn("receive packet error", "error", err, "client", cl.ID)
+		}
+	}
+
+	return nil
 }
