@@ -346,15 +346,15 @@ func (s *Subscribers) MergeSharedSelected() {
 	}
 }
 
-// TopicsIndex is a prefix/trie tree containing topic subscribers and retained messages.
-type TopicsIndex struct {
+// TopicsIndexShard is a prefix/trie tree containing topic subscribers and retained messages.
+type TopicsIndexShard struct {
 	Retained *packets.Packets
 	root     *particle // a leaf containing a message and more leaves.
 }
 
-// NewTopicsIndex returns a pointer to a new instance of Index.
-func NewTopicsIndex() *TopicsIndex {
-	return &TopicsIndex{
+// NewTopicsIndexShard returns a pointer to a new instance of TopicsIndexShard.
+func NewTopicsIndexShard() *TopicsIndexShard {
+	return &TopicsIndexShard{
 		Retained: packets.NewPackets(),
 		root: &particle{
 			particles:     newParticles(),
@@ -363,14 +363,288 @@ func NewTopicsIndex() *TopicsIndex {
 	}
 }
 
+const shardCount = 128
+
+// TopicsIndex is a sharded trie structure containing sharded topic subscribers and retained messages.
+type TopicsIndex struct {
+	Retained      *packets.Packets
+	shards        [shardCount]*TopicsIndexShard
+	wildcardShard *TopicsIndexShard
+}
+
+// NewTopicsIndex returns a pointer to a new sharded instance of TopicsIndex.
+func NewTopicsIndex() *TopicsIndex {
+	idx := &TopicsIndex{
+		Retained:      packets.NewPackets(),
+		wildcardShard: NewTopicsIndexShard(),
+	}
+	for i := 0; i < shardCount; i++ {
+		idx.shards[i] = NewTopicsIndexShard()
+	}
+	return idx
+}
+
+func hash(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h *= 16777619
+		h ^= uint32(s[i])
+	}
+	return h
+}
+
+func (x *TopicsIndex) getShard(firstLevel string) *TopicsIndexShard {
+	if firstLevel == "+" || firstLevel == "#" {
+		return x.wildcardShard
+	}
+	return x.shards[hash(firstLevel)%shardCount]
+}
+
+func getFirstLevel(filter string, d int) string {
+	key, _ := isolateParticle(filter, d)
+	return key
+}
+
+// getShardForTopic returns the shard that would contain the given topic.
+// This is primarily for testing purposes.
+func (x *TopicsIndex) getShardForTopic(topic string) *TopicsIndexShard {
+	firstLevel := getFirstLevel(topic, 0)
+	return x.getShard(firstLevel)
+}
+
+// set is a testing helper that routes to the appropriate shard
+func (x *TopicsIndex) set(topic string, d int) *particle {
+	firstLevel := getFirstLevel(topic, d)
+	shard := x.getShard(firstLevel)
+	return shard.set(topic, d)
+}
+
+// seek is a testing helper that routes to the appropriate shard
+func (x *TopicsIndex) seek(filter string, d int) *particle {
+	firstLevel := getFirstLevel(filter, d)
+	shard := x.getShard(firstLevel)
+	return shard.seek(filter, d)
+}
+
+// trim is a testing helper that operates on the particle's shard
+func (x *TopicsIndex) trim(n *particle) {
+	// Find which shard this particle belongs to by walking up to root
+	root := n
+	for root.parent != nil {
+		root = root.parent
+	}
+
+	// Find the shard that owns this root
+	for _, shard := range x.shards {
+		if shard.root == root {
+			shard.trim(n)
+			return
+		}
+	}
+	if x.wildcardShard.root == root {
+		x.wildcardShard.trim(n)
+	}
+}
+
+// scanSubscribers is a testing helper that routes to the appropriate shard
+// and also merges with wildcard shard like the production Subscribers() does
+func (x *TopicsIndex) scanSubscribers(topic string, d int, n *particle, subs *Subscribers) *Subscribers {
+	firstLevel := getFirstLevel(topic, d)
+	var shard *TopicsIndexShard
+	if firstLevel == "+" || firstLevel == "#" {
+		shard = x.wildcardShard
+	} else {
+		shard = x.getShard(firstLevel)
+	}
+
+	subs1 := shard.scanSubscribers(topic, d, n, subs)
+	subs2 := x.wildcardShard.scanSubscribers(topic, 0, nil, &Subscribers{
+		Shared:              map[string]map[string]packets.Subscription{},
+		SharedSelected:      map[string]packets.Subscription{},
+		Subscriptions:       map[string]packets.Subscription{},
+		InlineSubscriptions: map[int]InlineSubscription{},
+	})
+
+	return mergeSubscribers(subs1, subs2)
+}
+
+// RetainedLen returns the total number of retained messages across all shards.
+func (x *TopicsIndex) RetainedLen() int {
+	var count int
+	for _, shard := range x.shards {
+		count += shard.Retained.Len()
+	}
+	return count
+}
+
+// ClearExpiredRetainedMessages scans all shards and deletes expired retained messages.
+func (x *TopicsIndex) ClearExpiredRetainedMessages(now int64, maxExpiry int64, onExpired func(filter string)) {
+	for filter, pk := range x.Retained.GetAll() {
+		expired := pk.ProtocolVersion == 5 && pk.Expiry > 0 && pk.Expiry < now
+		enforced := maxExpiry > 0 && now-pk.Created > maxExpiry
+
+		if expired || enforced {
+			x.Retained.Delete(filter)
+			firstLevel := getFirstLevel(filter, 0)
+			shard := x.getShard(firstLevel)
+			shard.Retained.Delete(filter)
+			onExpired(filter)
+		}
+	}
+}
+
 // InlineSubscribe adds a new internal subscription for a topic filter, returning
 // true if the subscription was new.
 func (x *TopicsIndex) InlineSubscribe(subscription InlineSubscription) bool {
-	x.root.Lock()
-	defer x.root.Unlock()
+	firstLevel := getFirstLevel(subscription.Filter, 0)
+	shard := x.getShard(firstLevel)
+	return shard.InlineSubscribe(subscription)
+}
+
+// InlineUnsubscribe removes an internal subscription for a topic filter associated with a specific client,
+// returning true if the subscription existed.
+func (x *TopicsIndex) InlineUnsubscribe(id int, filter string) bool {
+	firstLevel := getFirstLevel(filter, 0)
+	shard := x.getShard(firstLevel)
+	return shard.InlineUnsubscribe(id, filter)
+}
+
+// Subscribe adds a new subscription for a client to a topic filter, returning
+// true if the subscription was new.
+func (x *TopicsIndex) Subscribe(client string, subscription packets.Subscription) bool {
+	var d int
+	prefix, _ := isolateParticle(subscription.Filter, 0)
+	if strings.EqualFold(prefix, SharePrefix) {
+		d = 2
+	}
+	firstLevel := getFirstLevel(subscription.Filter, d)
+	shard := x.getShard(firstLevel)
+	return shard.Subscribe(client, subscription)
+}
+
+// Unsubscribe removes a subscription filter for a client, returning true if the
+// subscription existed.
+func (x *TopicsIndex) Unsubscribe(filter, client string) bool {
+	var d int
+	prefix, _ := isolateParticle(filter, 0)
+	if strings.EqualFold(prefix, SharePrefix) {
+		d = 2
+	}
+	firstLevel := getFirstLevel(filter, d)
+	shard := x.getShard(firstLevel)
+	return shard.Unsubscribe(filter, client)
+}
+
+// RetainMessage saves a message payload to the end of a topic address. Returns
+// 1 if a retained message was added, and -1 if the retained message was removed.
+// 0 is returned if sequential empty payloads are received.
+func (x *TopicsIndex) RetainMessage(pk packets.Packet) int64 {
+	firstLevel := getFirstLevel(pk.TopicName, 0)
+	shard := x.getShard(firstLevel)
+
+	// Mirror to global Retained packets for testing/compatibility
+	if len(pk.Payload) > 0 {
+		x.Retained.Add(pk.TopicName, pk)
+	} else {
+		x.Retained.Delete(pk.TopicName)
+	}
+
+	return shard.RetainMessage(pk)
+}
+
+// Messages returns a slice of any retained messages which match a filter.
+func (x *TopicsIndex) Messages(filter string) []packets.Packet {
+	firstLevel := getFirstLevel(filter, 0)
+	if firstLevel == "+" || firstLevel == "#" {
+		var pks []packets.Packet
+		for _, shard := range x.shards {
+			pks = append(pks, shard.Messages(filter)...)
+		}
+		return pks
+	}
+	shard := x.getShard(firstLevel)
+	return shard.Messages(filter)
+}
+
+// Subscribers returns a map of clients who are subscribed to matching filters,
+// their subscription ids and highest qos.
+func (x *TopicsIndex) Subscribers(topic string) *Subscribers {
+	firstLevel := getFirstLevel(topic, 0)
+	var shard *TopicsIndexShard
+	if firstLevel == "+" || firstLevel == "#" {
+		shard = x.wildcardShard
+	} else {
+		shard = x.getShard(firstLevel)
+	}
+
+	subs1 := shard.Subscribers(topic)
+	subs2 := x.wildcardShard.Subscribers(topic)
+
+	return mergeSubscribers(subs1, subs2)
+}
+
+func mergeSubscribers(s1, s2 *Subscribers) *Subscribers {
+	if s1 == nil {
+		return s2
+	}
+	if s2 == nil {
+		return s1
+	}
+
+	// Merge Subscriptions
+	if len(s2.Subscriptions) > 0 {
+		if s1.Subscriptions == nil {
+			s1.Subscriptions = map[string]packets.Subscription{}
+		}
+		for client, sub := range s2.Subscriptions {
+			if existing, ok := s1.Subscriptions[client]; ok {
+				s1.Subscriptions[client] = existing.Merge(sub)
+			} else {
+				s1.Subscriptions[client] = sub
+			}
+		}
+	}
+
+	// Merge Shared
+	if len(s2.Shared) > 0 {
+		if s1.Shared == nil {
+			s1.Shared = map[string]map[string]packets.Subscription{}
+		}
+		for filter, clients := range s2.Shared {
+			if s1.Shared[filter] == nil {
+				s1.Shared[filter] = map[string]packets.Subscription{}
+			}
+			for client, sub := range clients {
+				if existing, ok := s1.Shared[filter][client]; ok {
+					s1.Shared[filter][client] = existing.Merge(sub)
+				} else {
+					s1.Shared[filter][client] = sub
+				}
+			}
+		}
+	}
+
+	// Merge InlineSubscriptions
+	if len(s2.InlineSubscriptions) > 0 {
+		if s1.InlineSubscriptions == nil {
+			s1.InlineSubscriptions = map[int]InlineSubscription{}
+		}
+		for id, sub := range s2.InlineSubscriptions {
+			s1.InlineSubscriptions[id] = sub
+		}
+	}
+
+	return s1
+}
+
+// InlineSubscribe adds a new internal subscription for a topic filter, returning
+// true if the subscription was new.
+func (s *TopicsIndexShard) InlineSubscribe(subscription InlineSubscription) bool {
+	s.root.Lock()
+	defer s.root.Unlock()
 
 	var existed bool
-	n := x.set(subscription.Filter, 0)
+	n := s.set(subscription.Filter, 0)
 	_, existed = n.inlineSubscriptions.Get(subscription.Identifier)
 	n.inlineSubscriptions.Add(subscription)
 
@@ -379,11 +653,11 @@ func (x *TopicsIndex) InlineSubscribe(subscription InlineSubscription) bool {
 
 // InlineUnsubscribe removes an internal subscription for a topic filter associated with a specific client,
 // returning true if the subscription existed.
-func (x *TopicsIndex) InlineUnsubscribe(id int, filter string) bool {
-	x.root.Lock()
-	defer x.root.Unlock()
+func (s *TopicsIndexShard) InlineUnsubscribe(id int, filter string) bool {
+	s.root.Lock()
+	defer s.root.Unlock()
 
-	particle := x.seek(filter, 0)
+	particle := s.seek(filter, 0)
 	if particle == nil {
 		return false
 	}
@@ -391,26 +665,26 @@ func (x *TopicsIndex) InlineUnsubscribe(id int, filter string) bool {
 	particle.inlineSubscriptions.Delete(id)
 
 	if particle.inlineSubscriptions.Len() == 0 {
-		x.trim(particle)
+		s.trim(particle)
 	}
 	return true
 }
 
 // Subscribe adds a new subscription for a client to a topic filter, returning
 // true if the subscription was new.
-func (x *TopicsIndex) Subscribe(client string, subscription packets.Subscription) bool {
-	x.root.Lock()
-	defer x.root.Unlock()
+func (s *TopicsIndexShard) Subscribe(client string, subscription packets.Subscription) bool {
+	s.root.Lock()
+	defer s.root.Unlock()
 
 	var existed bool
 	prefix, _ := isolateParticle(subscription.Filter, 0)
 	if strings.EqualFold(prefix, SharePrefix) {
 		group, _ := isolateParticle(subscription.Filter, 1)
-		n := x.set(subscription.Filter, 2)
+		n := s.set(subscription.Filter, 2)
 		_, existed = n.shared.Get(group, client)
 		n.shared.Add(group, client, subscription)
 	} else {
-		n := x.set(subscription.Filter, 0)
+		n := s.set(subscription.Filter, 0)
 		_, existed = n.subscriptions.Get(client)
 		n.subscriptions.Add(client, subscription)
 	}
@@ -420,9 +694,9 @@ func (x *TopicsIndex) Subscribe(client string, subscription packets.Subscription
 
 // Unsubscribe removes a subscription filter for a client, returning true if the
 // subscription existed.
-func (x *TopicsIndex) Unsubscribe(filter, client string) bool {
-	x.root.Lock()
-	defer x.root.Unlock()
+func (s *TopicsIndexShard) Unsubscribe(filter, client string) bool {
+	s.root.Lock()
+	defer s.root.Unlock()
 
 	var d int
 	prefix, _ := isolateParticle(filter, 0)
@@ -431,7 +705,7 @@ func (x *TopicsIndex) Unsubscribe(filter, client string) bool {
 		d = 2
 	}
 
-	particle := x.seek(filter, d)
+	particle := s.seek(filter, d)
 	if particle == nil {
 		return false
 	}
@@ -443,43 +717,43 @@ func (x *TopicsIndex) Unsubscribe(filter, client string) bool {
 		particle.subscriptions.Delete(client)
 	}
 
-	x.trim(particle)
+	s.trim(particle)
 	return true
 }
 
 // RetainMessage saves a message payload to the end of a topic address. Returns
 // 1 if a retained message was added, and -1 if the retained message was removed.
 // 0 is returned if sequential empty payloads are received.
-func (x *TopicsIndex) RetainMessage(pk packets.Packet) int64 {
-	x.root.Lock()
-	defer x.root.Unlock()
+func (s *TopicsIndexShard) RetainMessage(pk packets.Packet) int64 {
+	s.root.Lock()
+	defer s.root.Unlock()
 
-	n := x.set(pk.TopicName, 0)
+	n := s.set(pk.TopicName, 0)
 	n.Lock()
 	defer n.Unlock()
 	if len(pk.Payload) > 0 {
 		n.retainPath = pk.TopicName
-		x.Retained.Add(pk.TopicName, pk)
+		s.Retained.Add(pk.TopicName, pk)
 		return 1
 	}
 
 	var out int64
-	if pke, ok := x.Retained.Get(pk.TopicName); ok && len(pke.Payload) > 0 && pke.FixedHeader.Retain {
+	if pke, ok := s.Retained.Get(pk.TopicName); ok && len(pke.Payload) > 0 && pke.FixedHeader.Retain {
 		out = -1 // if a retained packet existed, return -1
 	}
 
 	n.retainPath = ""
-	x.Retained.Delete(pk.TopicName) // [MQTT-3.3.1-6] [MQTT-3.3.1-7]
-	x.trim(n)
+	s.Retained.Delete(pk.TopicName) // [MQTT-3.3.1-6] [MQTT-3.3.1-7]
+	s.trim(n)
 
 	return out
 }
 
 // set creates a topic address in the index and returns the final particle.
-func (x *TopicsIndex) set(topic string, d int) *particle {
+func (s *TopicsIndexShard) set(topic string, d int) *particle {
 	var key string
 	var hasNext = true
-	n := x.root
+	n := s.root
 	for hasNext {
 		key, hasNext = isolateParticle(topic, d)
 		d++
@@ -496,10 +770,10 @@ func (x *TopicsIndex) set(topic string, d int) *particle {
 }
 
 // seek finds the particle at a specific index in a topic filter.
-func (x *TopicsIndex) seek(filter string, d int) *particle {
+func (s *TopicsIndexShard) seek(filter string, d int) *particle {
 	var key string
 	var hasNext = true
-	n := x.root
+	n := s.root
 	for hasNext {
 		key, hasNext = isolateParticle(filter, d)
 		n = n.particles.get(key)
@@ -513,7 +787,7 @@ func (x *TopicsIndex) seek(filter string, d int) *particle {
 }
 
 // trim removes empty filter particles from the index.
-func (x *TopicsIndex) trim(n *particle) {
+func (s *TopicsIndexShard) trim(n *particle) {
 	for n.parent != nil && n.retainPath == "" && n.particles.len()+n.subscriptions.Len()+n.shared.Len()+n.inlineSubscriptions.Len() == 0 {
 		key := n.key
 		n = n.parent
@@ -522,22 +796,22 @@ func (x *TopicsIndex) trim(n *particle) {
 }
 
 // Messages returns a slice of any retained messages which match a filter.
-func (x *TopicsIndex) Messages(filter string) []packets.Packet {
-	return x.scanMessages(filter, 0, nil, []packets.Packet{})
+func (s *TopicsIndexShard) Messages(filter string) []packets.Packet {
+	return s.scanMessages(filter, 0, nil, []packets.Packet{})
 }
 
 // scanMessages returns all retained messages on topics matching a given filter.
-func (x *TopicsIndex) scanMessages(filter string, d int, n *particle, pks []packets.Packet) []packets.Packet {
+func (s *TopicsIndexShard) scanMessages(filter string, d int, n *particle, pks []packets.Packet) []packets.Packet {
 	if n == nil {
-		n = x.root
+		n = s.root
 	}
 
-	if len(filter) == 0 || x.Retained.Len() == 0 {
+	if len(filter) == 0 || s.Retained.Len() == 0 {
 		return pks
 	}
 
 	if !strings.ContainsRune(filter, '#') && !strings.ContainsRune(filter, '+') {
-		if pk, ok := x.Retained.Get(filter); ok {
+		if pk, ok := s.Retained.Get(filter); ok {
 			pks = append(pks, pk)
 		}
 		return pks
@@ -552,14 +826,14 @@ func (x *TopicsIndex) scanMessages(filter string, d int, n *particle, pks []pack
 
 			if !hasNext {
 				if adjacent.retainPath != "" {
-					if pk, ok := x.Retained.Get(adjacent.retainPath); ok {
+					if pk, ok := s.Retained.Get(adjacent.retainPath); ok {
 						pks = append(pks, pk)
 					}
 				}
 			}
 
 			if hasNext || (d >= 0 && key == "#") {
-				pks = x.scanMessages(filter, d+1, adjacent, pks)
+				pks = s.scanMessages(filter, d+1, adjacent, pks)
 			}
 		}
 		return pks
@@ -567,10 +841,10 @@ func (x *TopicsIndex) scanMessages(filter string, d int, n *particle, pks []pack
 
 	if particle := n.particles.get(key); particle != nil {
 		if hasNext {
-			return x.scanMessages(filter, d+1, particle, pks)
+			return s.scanMessages(filter, d+1, particle, pks)
 		}
 
-		if pk, ok := x.Retained.Get(particle.retainPath); ok {
+		if pk, ok := s.Retained.Get(particle.retainPath); ok {
 			pks = append(pks, pk)
 		}
 	}
@@ -580,8 +854,8 @@ func (x *TopicsIndex) scanMessages(filter string, d int, n *particle, pks []pack
 
 // Subscribers returns a map of clients who are subscribed to matching filters,
 // their subscription ids and highest qos.
-func (x *TopicsIndex) Subscribers(topic string) *Subscribers {
-	return x.scanSubscribers(topic, 0, nil, &Subscribers{
+func (s *TopicsIndexShard) Subscribers(topic string) *Subscribers {
+	return s.scanSubscribers(topic, 0, nil, &Subscribers{
 		Shared:              map[string]map[string]packets.Subscription{},
 		SharedSelected:      map[string]packets.Subscription{},
 		Subscriptions:       map[string]packets.Subscription{},
@@ -590,9 +864,9 @@ func (x *TopicsIndex) Subscribers(topic string) *Subscribers {
 }
 
 // scanSubscribers returns a list of client subscriptions matching an indexed topic address.
-func (x *TopicsIndex) scanSubscribers(topic string, d int, n *particle, subs *Subscribers) *Subscribers {
+func (s *TopicsIndexShard) scanSubscribers(topic string, d int, n *particle, subs *Subscribers) *Subscribers {
 	if n == nil {
-		n = x.root
+		n = s.root
 	}
 
 	if len(topic) == 0 {
@@ -603,32 +877,32 @@ func (x *TopicsIndex) scanSubscribers(topic string, d int, n *particle, subs *Su
 	for _, partKey := range []string{key, "+"} {
 		if particle := n.particles.get(partKey); particle != nil { // [MQTT-3.3.2-3]
 			if hasNext {
-				x.scanSubscribers(topic, d+1, particle, subs)
+				s.scanSubscribers(topic, d+1, particle, subs)
 			} else {
-				x.gatherSubscriptions(topic, particle, subs)
-				x.gatherSharedSubscriptions(particle, subs)
-				x.gatherInlineSubscriptions(particle, subs)
+				s.gatherSubscriptions(topic, particle, subs)
+				s.gatherSharedSubscriptions(particle, subs)
+				s.gatherInlineSubscriptions(particle, subs)
 
 				if wild := particle.particles.get("#"); wild != nil && partKey != "+" {
-					x.gatherSubscriptions(topic, wild, subs) // also match any subs where filter/# is filter as per 4.7.1.2
-					x.gatherSharedSubscriptions(wild, subs)
-					x.gatherInlineSubscriptions(particle, subs)
+					s.gatherSubscriptions(topic, wild, subs) // also match any subs where filter/# is filter as per 4.7.1.2
+					s.gatherSharedSubscriptions(wild, subs)
+					s.gatherInlineSubscriptions(particle, subs)
 				}
 			}
 		}
 	}
 
 	if particle := n.particles.get("#"); particle != nil {
-		x.gatherSubscriptions(topic, particle, subs)
-		x.gatherSharedSubscriptions(particle, subs)
-		x.gatherInlineSubscriptions(particle, subs)
+		s.gatherSubscriptions(topic, particle, subs)
+		s.gatherSharedSubscriptions(particle, subs)
+		s.gatherInlineSubscriptions(particle, subs)
 	}
 
 	return subs
 }
 
 // gatherSubscriptions collects any matching subscriptions, and gathers any identifiers or highest qos values.
-func (x *TopicsIndex) gatherSubscriptions(topic string, particle *particle, subs *Subscribers) {
+func (s *TopicsIndexShard) gatherSubscriptions(topic string, particle *particle, subs *Subscribers) {
 	if subs.Subscriptions == nil {
 		subs.Subscriptions = map[string]packets.Subscription{}
 	}
@@ -648,7 +922,7 @@ func (x *TopicsIndex) gatherSubscriptions(topic string, particle *particle, subs
 }
 
 // gatherSharedSubscriptions gathers all shared subscriptions for a particle.
-func (x *TopicsIndex) gatherSharedSubscriptions(particle *particle, subs *Subscribers) {
+func (s *TopicsIndexShard) gatherSharedSubscriptions(particle *particle, subs *Subscribers) {
 	if subs.Shared == nil {
 		subs.Shared = map[string]map[string]packets.Subscription{}
 	}
@@ -665,7 +939,7 @@ func (x *TopicsIndex) gatherSharedSubscriptions(particle *particle, subs *Subscr
 }
 
 // gatherSharedSubscriptions gathers all inline subscriptions for a particle.
-func (x *TopicsIndex) gatherInlineSubscriptions(particle *particle, subs *Subscribers) {
+func (s *TopicsIndexShard) gatherInlineSubscriptions(particle *particle, subs *Subscribers) {
 	if subs.InlineSubscriptions == nil {
 		subs.InlineSubscriptions = map[int]InlineSubscription{}
 	}

@@ -17,6 +17,12 @@ const (
 	otherGroup = "other"
 )
 
+// Helper function to get the root of the shard that contains a topic for testing
+func getShardRoot(index *TopicsIndex, topic string) *particle {
+	shard := index.getShardForTopic(topic)
+	return shard.root
+}
+
 func TestNewSharedSubscriptions(t *testing.T) {
 	s := NewSharedSubscriptions()
 	require.NotNil(t, s.internal)
@@ -158,7 +164,8 @@ func TestSubscriptionsDelete(t *testing.T) {
 func TestNewTopicsIndex(t *testing.T) {
 	index := NewTopicsIndex()
 	require.NotNil(t, index)
-	require.NotNil(t, index.root)
+	require.NotNil(t, index.shards)
+	require.Equal(t, shardCount, len(index.shards))
 }
 
 func BenchmarkNewTopicsIndex(b *testing.B) {
@@ -218,7 +225,7 @@ func TestSubscribe(t *testing.T) {
 		})
 	}
 
-	final := index.root.particles.get("a").particles.get("b").particles.get("c")
+	final := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c")
 	require.NotNil(t, final)
 	client, exists := final.subscriptions.Get("cl1")
 	require.True(t, exists)
@@ -228,7 +235,7 @@ func TestSubscribe(t *testing.T) {
 func TestSubscribeShared(t *testing.T) {
 	index := NewTopicsIndex()
 	index.Subscribe("cl1", packets.Subscription{Filter: SharePrefix + "/tmp/a/b/c", Qos: 2})
-	final := index.root.particles.get("a").particles.get("b").particles.get("c")
+	final := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c")
 	require.NotNil(t, final)
 	client, exists := final.shared.Get("tmp", "cl1")
 	require.True(t, exists)
@@ -254,42 +261,42 @@ func BenchmarkSubscribeShared(b *testing.B) {
 func TestUnsubscribe(t *testing.T) {
 	index := NewTopicsIndex()
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/c/d", Qos: 1})
-	client, exists := index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").subscriptions.Get("cl1")
+	client, exists := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c").particles.get("d").subscriptions.Get("cl1")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/+/d", Qos: 1})
-	client, exists = index.root.particles.get("a").particles.get("b").particles.get("+").particles.get("d").subscriptions.Get("cl1")
+	client, exists = getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("+").particles.get("d").subscriptions.Get("cl1")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
 	index.Subscribe("cl1", packets.Subscription{Filter: "d/e/f", Qos: 1})
-	client, exists = index.root.particles.get("d").particles.get("e").particles.get("f").subscriptions.Get("cl1")
+	client, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").subscriptions.Get("cl1")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
 	index.Subscribe("cl2", packets.Subscription{Filter: "d/e/f", Qos: 1})
-	client, exists = index.root.particles.get("d").particles.get("e").particles.get("f").subscriptions.Get("cl2")
+	client, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").subscriptions.Get("cl2")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
 	index.Subscribe("cl3", packets.Subscription{Filter: "#", Qos: 2})
-	client, exists = index.root.particles.get("#").subscriptions.Get("cl3")
+	client, exists = getShardRoot(index, "#").particles.get("#").subscriptions.Get("cl3")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
 	ok := index.Unsubscribe("a/b/c/d", "cl1")
 	require.True(t, ok)
-	require.Nil(t, index.root.particles.get("a").particles.get("b").particles.get("c"))
-	client, exists = index.root.particles.get("a").particles.get("b").particles.get("+").particles.get("d").subscriptions.Get("cl1")
+	require.Nil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c"))
+	client, exists = getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("+").particles.get("d").subscriptions.Get("cl1")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
 	ok = index.Unsubscribe("d/e/f", "cl1")
 	require.True(t, ok)
 
-	require.Equal(t, 1, index.root.particles.get("d").particles.get("e").particles.get("f").subscriptions.Len())
-	client, exists = index.root.particles.get("d").particles.get("e").particles.get("f").subscriptions.Get("cl2")
+	require.Equal(t, 1, getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").subscriptions.Len())
+	client, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").subscriptions.Get("cl2")
 	require.NotNil(t, client)
 	require.True(t, exists)
 
@@ -304,9 +311,9 @@ func TestUnsubscribeNoCascade(t *testing.T) {
 
 	ok := index.Unsubscribe("a/b/c/e/e", "cl1")
 	require.True(t, ok)
-	require.Equal(t, 1, index.root.particles.len())
+	require.Equal(t, 1, getShardRoot(index, "a").particles.len())
 
-	client, exists := index.root.particles.get("a").particles.get("b").particles.get("c").subscriptions.Get("cl1")
+	client, exists := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c").subscriptions.Get("cl1")
 	require.NotNil(t, client)
 	require.True(t, exists)
 }
@@ -314,7 +321,7 @@ func TestUnsubscribeNoCascade(t *testing.T) {
 func TestUnsubscribeShared(t *testing.T) {
 	index := NewTopicsIndex()
 	index.Subscribe("cl1", packets.Subscription{Filter: "$SHARE/tmp/a/b/c", Qos: 2})
-	final := index.root.particles.get("a").particles.get("b").particles.get("c")
+	final := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c")
 	require.NotNil(t, final)
 	client, exists := final.shared.Get("tmp", "cl1")
 	require.True(t, exists)
@@ -362,27 +369,27 @@ func TestIndexTrim(t *testing.T) {
 	k3.subscriptions.Add("cl1", packets.Subscription{})
 
 	index.trim(k2)
-	require.NotNil(t, index.root.particles.get("a").particles.get("b").particles.get("c"))
-	require.NotNil(t, index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").particles.get("e").particles.get("f"))
-	require.NotNil(t, index.root.particles.get("a").particles.get("b"))
+	require.NotNil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c"))
+	require.NotNil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c").particles.get("d").particles.get("e").particles.get("f"))
+	require.NotNil(t, getShardRoot(index, "a").particles.get("a").particles.get("b"))
 
 	k2.subscriptions.Delete("cl1")
 	index.trim(k2)
 
-	require.Nil(t, index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d"))
-	require.NotNil(t, index.root.particles.get("a").particles.get("b").particles.get("c"))
+	require.Nil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c").particles.get("d"))
+	require.NotNil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c"))
 
 	k1.subscriptions.Delete("cl1")
 	k3.subscriptions.Delete("cl1")
 	index.trim(k2)
-	require.Nil(t, index.root.particles.get("a"))
+	require.Nil(t, getShardRoot(index, "a").particles.get("a"))
 }
 
 func TestIndexSet(t *testing.T) {
 	index := NewTopicsIndex()
 	child := index.set("a/b/c", 0)
 	require.Equal(t, "c", child.key)
-	require.NotNil(t, index.root.particles.get("a").particles.get("b").particles.get("c"))
+	require.NotNil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c"))
 
 	child = index.set("a/b/c/d/e", 0)
 	require.Equal(t, "e", child.key)
@@ -395,7 +402,7 @@ func TestIndexSetPrefixed(t *testing.T) {
 	index := NewTopicsIndex()
 	child := index.set("/c", 0)
 	require.Equal(t, "c", child.key)
-	require.NotNil(t, index.root.particles.get("").particles.get("c"))
+	require.NotNil(t, getShardRoot(index, "").particles.get("").particles.get("c"))
 }
 
 func BenchmarkIndexSet(b *testing.B) {
@@ -1000,7 +1007,7 @@ func TestInlineSubscribe(t *testing.T) {
 		})
 	}
 
-	final := index.root.particles.get("a").particles.get("b").particles.get("c")
+	final := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c")
 	require.NotNil(t, final)
 }
 
@@ -1011,57 +1018,57 @@ func TestInlineUnsubscribe(t *testing.T) {
 
 	index := NewTopicsIndex()
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "a/b/c/d", Identifier: 1}})
-	sub, exists := index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").inlineSubscriptions.Get(1)
+	sub, exists := getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c").particles.get("d").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index = NewTopicsIndex()
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "a/b/c/d", Identifier: 1}})
-	sub, exists = index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c").particles.get("d").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "d/e/f", Identifier: 1}})
-	sub, exists = index.root.particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "d/e/f", Identifier: 2}})
-	sub, exists = index.root.particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(2)
+	sub, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(2)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "a/b/+/d", Identifier: 1}})
-	sub, exists = index.root.particles.get("a").particles.get("b").particles.get("+").particles.get("d").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("+").particles.get("d").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "d/e/f", Identifier: 1}})
-	sub, exists = index.root.particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "d/e/f", Identifier: 1}})
-	sub, exists = index.root.particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "#", Identifier: 1}})
-	sub, exists = index.root.particles.get("#").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "#").particles.get("#").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	ok := index.InlineUnsubscribe(1, "a/b/c/d")
 	require.True(t, ok)
-	require.Nil(t, index.root.particles.get("a").particles.get("b").particles.get("c"))
+	require.Nil(t, getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("c"))
 
-	sub, exists = index.root.particles.get("a").particles.get("b").particles.get("+").particles.get("d").inlineSubscriptions.Get(1)
+	sub, exists = getShardRoot(index, "a").particles.get("a").particles.get("b").particles.get("+").particles.get("d").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
 	ok = index.InlineUnsubscribe(1, "d/e/f")
 	require.True(t, ok)
-	require.NotNil(t, index.root.particles.get("d").particles.get("e").particles.get("f"))
+	require.NotNil(t, getShardRoot(index, "d").particles.get("d").particles.get("e").particles.get("f"))
 
 	ok = index.InlineUnsubscribe(1, "not/exist")
 	require.False(t, ok)
