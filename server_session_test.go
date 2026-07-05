@@ -100,6 +100,7 @@ func TestInheritClientSessionRestoresInflightQuotas(t *testing.T) {
 	s.Options.Capabilities.ReceiveMaximum = 6
 
 	existing, _, _ := newTestClient()
+	existing.Closed()
 	existing.ops.options.Capabilities.ReceiveMaximum = 6
 	existing.Net.Transport = nil
 	existing.ID = "client-quota-inherit"
