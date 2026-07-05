@@ -5,6 +5,8 @@
 package mqtt
 
 import (
+	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/mochi-mqtt/server/v2/packets"
@@ -98,8 +100,8 @@ func TestResetReceiveQuota(t *testing.T) {
 
 func TestReceiveQuota(t *testing.T) {
 	i := NewInflights()
-	i.receiveQuotaState.value = 4
-	i.receiveQuotaState.maximum = 5
+	i.ResetReceiveQuota(5)
+	i.DecreaseReceiveQuota()
 	require.Equal(t, int32(5), i.MaximumReceiveQuota())
 	require.Equal(t, int32(4), i.ReceiveQuota())
 
@@ -129,6 +131,31 @@ func TestReceiveQuota(t *testing.T) {
 	require.Equal(t, int32(0), i.ReceiveQuota())
 }
 
+func TestReceiveQuotaConcurrentDecreaseStopsAtZero(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	for attempt := 0; attempt < 100; attempt++ {
+		i := NewInflights()
+		i.ResetReceiveQuota(1)
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for j := 0; j < 256; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				i.DecreaseReceiveQuota()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+
+		require.Equal(t, int32(0), i.ReceiveQuota())
+	}
+}
+
 func TestResetSendQuota(t *testing.T) {
 	i := NewInflights()
 	require.Equal(t, int32(0), i.MaximumSendQuota())
@@ -140,8 +167,8 @@ func TestResetSendQuota(t *testing.T) {
 
 func TestSendQuota(t *testing.T) {
 	i := NewInflights()
-	i.sendQuotaState.value = 4
-	i.sendQuotaState.maximum = 5
+	i.ResetSendQuota(5)
+	i.DecreaseSendQuota()
 	require.Equal(t, int32(5), i.MaximumSendQuota())
 	require.Equal(t, int32(4), i.SendQuota())
 
@@ -169,6 +196,31 @@ func TestSendQuota(t *testing.T) {
 	i.DecreaseSendQuota()
 	require.Equal(t, int32(1), i.MaximumSendQuota())
 	require.Equal(t, int32(0), i.SendQuota())
+}
+
+func TestSendQuotaConcurrentDecreaseStopsAtZero(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	for attempt := 0; attempt < 100; attempt++ {
+		i := NewInflights()
+		i.ResetSendQuota(1)
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for j := 0; j < 256; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				i.DecreaseSendQuota()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+
+		require.Equal(t, int32(0), i.SendQuota())
+	}
 }
 
 func TestNextImmediate(t *testing.T) {
