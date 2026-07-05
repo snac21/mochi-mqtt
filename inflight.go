@@ -11,7 +11,6 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
-// LOCK ORDER: quotaState.Mutex must never be held when acquiring Inflight.RWMutex
 type quotaState struct {
 	sync.Mutex
 	value   int32
@@ -169,19 +168,12 @@ func (i *Inflight) Delete(id uint16) bool {
 	return ok
 }
 
-// DecreaseReceiveQuota reduces the receive quota by 1.
+// TakeRecieveQuota reduces the receive quota by 1.
 func (i *Inflight) DecreaseReceiveQuota() {
 	i.receiveQuotaState.decrease()
 }
 
-// TryDecreaseReceiveQuota atomically checks and decrements the receive quota.
-// Returns true if the quota was successfully decremented, false if already at zero.
-func (i *Inflight) TryDecreaseReceiveQuota() bool {
-	_, ok := i.receiveQuotaState.decrease()
-	return ok
-}
-
-// IncreaseReceiveQuota increases the receive quota by 1.
+// TakeRecieveQuota increases the receive quota by 1.
 func (i *Inflight) IncreaseReceiveQuota() {
 	i.receiveQuotaState.increase()
 }
@@ -204,13 +196,6 @@ func (i *Inflight) MaximumReceiveQuota() int32 {
 // DecreaseSendQuota reduces the send quota by 1.
 func (i *Inflight) DecreaseSendQuota() {
 	i.sendQuotaState.decrease()
-}
-
-// TryDecreaseSendQuota atomically checks and decrements the send quota.
-// Returns true if the quota was successfully decremented, false if already at zero.
-func (i *Inflight) TryDecreaseSendQuota() bool {
-	_, ok := i.sendQuotaState.decrease()
-	return ok
 }
 
 // IncreaseSendQuota increases the send quota by 1.
