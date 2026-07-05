@@ -99,9 +99,7 @@ func (l *Websocket) handler(w http.ResponseWriter, r *http.Request) {
 	defer c.Close()
 
 	err = l.establish(l.id, &wsConn{Conn: c.UnderlyingConn(), c: c})
-	if err != nil {
-		logEstablishError(l.log, err)
-	}
+	logEstablishError(l.log, err)
 }
 
 // Serve starts waiting for new Websocket connections, and calls the connection
