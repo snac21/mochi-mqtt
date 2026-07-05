@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 mochi-mqtt, mochi-co
+
+package transport
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"net"
+	"time"
+
+	"github.com/mochi-mqtt/server/v2/packets"
+)
+
+// TCPTransport implements the blocking I/O transport layer based on the standard library net.Conn.
+type TCPTransport struct {
+	conn   net.Conn
+	Bconn  *bufio.Reader // Exposed for backward compatibility with Mock tests
+	outbuf *bytes.Buffer
+}
+
+func NewTCPTransport(conn net.Conn, readBufferSize int) *TCPTransport {
+	return &TCPTransport{
+		conn:  conn,
+		Bconn: bufio.NewReaderSize(conn, readBufferSize),
+	}
+}
+
+func (t *TCPTransport) ReadFixedHeader(maxPacketSize uint32) (fh packets.FixedHeader, bytesRead int, err error) {
+	if t.Bconn == nil {
+		return fh, 0, ErrConnectionClosed
+	}
+
+	b, err := t.Bconn.ReadByte()
+	if err != nil {
+		return fh, 0, err
+	}
+
+	err = fh.Decode(b)
+	if err != nil {
+		return fh, 0, err
+	}
+
+	var bu int
+	fh.Remaining, bu, err = packets.DecodeLength(t.Bconn)
+	if err != nil {
+		return fh, 0, err
+	}
+
+	if maxPacketSize > 0 && uint32(fh.Remaining+1) > maxPacketSize {
+		return fh, bu + 1, packets.ErrPacketTooLarge
+	}
+
+	return fh, bu + 1, nil
+}
+
+func (t *TCPTransport) ReadPacket(fh *packets.FixedHeader, protocolVersion byte) (pk packets.Packet, bytesRead int, err error) {
+	if t.Bconn == nil {
+		return pk, 0, ErrConnectionClosed
+	}
+
+	pk.ProtocolVersion = protocolVersion
+	pk.FixedHeader = *fh
+
+	var px []byte
+	var n int
+	if fh.Remaining > 0 {
+		p := make([]byte, fh.Remaining)
+		n, err = io.ReadFull(t.Bconn, p)
+		if err != nil {
+			return pk, 0, err
+		}
+		px = append([]byte{}, p[:]...)
+	}
+
+	switch pk.FixedHeader.Type {
+	case packets.Connect:
+		err = pk.ConnectDecode(px)
+	case packets.Disconnect:
+		err = pk.DisconnectDecode(px)
+	case packets.Connack:
+		err = pk.ConnackDecode(px)
+	case packets.Publish:
+		err = pk.PublishDecode(px)
+	case packets.Puback:
+		err = pk.PubackDecode(px)
+	case packets.Pubrec:
+		err = pk.PubrecDecode(px)
+	case packets.Pubrel:
+		err = pk.PubrelDecode(px)
+	case packets.Pubcomp:
+		err = pk.PubcompDecode(px)
+	case packets.Subscribe:
+		err = pk.SubscribeDecode(px)
+	case packets.Suback:
+		err = pk.SubackDecode(px)
+	case packets.Unsubscribe:
+		err = pk.UnsubscribeDecode(px)
+	case packets.Unsuback:
+		err = pk.UnsubackDecode(px)
+	case packets.Pingreq:
+	case packets.Pingresp:
+	case packets.Auth:
+		err = pk.AuthDecode(px)
+	default:
+		err = fmt.Errorf("invalid packet type; %v", pk.FixedHeader.Type)
+	}
+
+	return pk, n, err
+}
+
+func (t *TCPTransport) ReadPacketDirect(protocolVersion byte, maxPacketSize uint32) (packets.Packet, int, error) {
+	return packets.Packet{}, 0, fmt.Errorf("ReadPacketDirect not supported for TCPTransport")
+}
+
+func (t *TCPTransport) Write(buf *bytes.Buffer, outboundQueueLen int, writeBufferSize int) (int64, error) {
+	if outboundQueueLen == 0 {
+		if t.outbuf == nil {
+			return buf.WriteTo(t.conn)
+		}
+
+		n, _ := t.outbuf.Write(buf.Bytes())
+		err := t.Flush()
+		return int64(n), err
+	}
+
+	if t.outbuf == nil {
+		if buf.Len() >= writeBufferSize {
+			return buf.WriteTo(t.conn)
+		}
+		t.outbuf = new(bytes.Buffer)
+	}
+
+	n, _ := t.outbuf.Write(buf.Bytes())
+	if t.outbuf.Len() < writeBufferSize {
+		return int64(n), nil
+	}
+
+	err := t.Flush()
+	return int64(n), err
+}
+
+func (t *TCPTransport) Flush() (err error) {
+	if t.outbuf == nil {
+		return
+	}
+	_, err = t.outbuf.WriteTo(t.conn)
+	if err == nil {
+		t.outbuf = nil
+	}
+	return
+}
+
+func (t *TCPTransport) Close() error {
+	if t.conn != nil {
+		return t.conn.Close()
+	}
+	return nil
+}
+
+func (t *TCPTransport) SetDeadline(tim time.Time) error {
+	if t.conn != nil {
+		return t.conn.SetDeadline(tim)
+	}
+	return nil
+}
+
+func (t *TCPTransport) UnderlyingConn() any {
+	return t.conn
+}
