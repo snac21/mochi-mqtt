@@ -5,12 +5,10 @@
 package mqtt
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -19,6 +17,7 @@ import (
 	"github.com/rs/xid"
 
 	"github.com/mochi-mqtt/server/v2/packets"
+	"github.com/mochi-mqtt/server/v2/transport"
 )
 
 const (
@@ -113,12 +112,10 @@ type Client struct {
 
 // ClientConnection contains the connection transport and metadata for the client.
 type ClientConnection struct {
-	Conn     net.Conn      // the net.Conn used to establish the connection
-	bconn    *bufio.Reader // a buffered net.Conn for reading packets
-	outbuf   *bytes.Buffer // a buffer for writing packets
-	Remote   string        // the remote address of the client
-	Listener string        // listener id of the client
-	Inline   bool          // if true, the client is the built-in 'inline' embedded client
+	Transport transport.Transport // the transport layer implementation
+	Remote    string              // the remote address of the client
+	Listener  string              // listener id of the client
+	Inline    bool                // if true, the client is the built-in 'inline' embedded client
 }
 
 // ClientProperties contains the properties which define the client behaviour.
@@ -159,11 +156,10 @@ type ClientState struct {
 	ServerKeepalive bool                 // keepalive was set by the server
 }
 
-// newClient returns a new instance of Client. This is almost exclusively used by Server
-// for creating new clients, but it lives here because it's not dependent.
-func newClient(c net.Conn, o *ops) *Client {
+// newClientBase returns a new instance of Client with default state initialized.
+func newClientBase(o *ops) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
-	cl := &Client{
+	return &Client{
 		State: ClientState{
 			Inflight:      NewInflights(),
 			Subscriptions: NewSubscriptions(),
@@ -174,20 +170,27 @@ func newClient(c net.Conn, o *ops) *Client {
 			outbound:      make(chan *packets.Packet, o.options.Capabilities.MaximumClientWritesPending),
 		},
 		Properties: ClientProperties{
-			ProtocolVersion: defaultClientProtocolVersion, // default protocol version
+			ProtocolVersion: defaultClientProtocolVersion,
 		},
 		ops: o,
 	}
+}
 
+// newTcpClient returns a new instance of Client with a TCP transport.
+func newTcpClient(c net.Conn, o *ops) *Client {
+	cl := newClientBase(o)
 	if c != nil {
 		cl.Net = ClientConnection{
-			Conn:   c,
-			bconn:  bufio.NewReaderSize(c, o.options.ClientNetReadBufferSize),
-			Remote: c.RemoteAddr().String(),
+			Transport: transport.NewTCPTransport(c, o.options.ClientNetReadBufferSize),
+			Remote:    c.RemoteAddr().String(),
 		}
 	}
-
 	return cl
+}
+
+// newClient is kept for backward compatibility and routes to newTcpClient.
+func newClient(c net.Conn, o *ops) *Client {
+	return newTcpClient(c, o)
 }
 
 // WriteLoop ranges over pending outbound messages and writes them to the client connection.
@@ -258,15 +261,15 @@ func (cl *Client) ParseConnect(lid string, pk packets.Packet) {
 	}
 }
 
-// refreshDeadline refreshes the read/write deadline for the net.Conn connection.
+// refreshDeadline refreshes the read/write deadline for the transport connection.
 func (cl *Client) refreshDeadline(keepalive uint16) {
 	var expiry time.Time // nil time can be used to disable deadline if keepalive = 0
 	if keepalive > 0 {
 		expiry = time.Now().Add(time.Duration(keepalive+(keepalive/2)) * time.Second) // [MQTT-3.1.2-22]
 	}
 
-	if cl.Net.Conn != nil {
-		_ = cl.Net.Conn.SetDeadline(expiry) // [MQTT-3.1.2-22]
+	if cl.Net.Transport != nil {
+		_ = cl.Net.Transport.SetDeadline(expiry) // [MQTT-3.1.2-22]
 	}
 }
 
@@ -392,9 +395,8 @@ func (cl *Client) Read(packetHandler ReadFn) error {
 // Stop instructs the client to shut down all processing goroutines and disconnect.
 func (cl *Client) Stop(err error) {
 	cl.State.endOnce.Do(func() {
-
-		if cl.Net.Conn != nil {
-			_ = cl.Net.Conn.Close() // omit close error
+		if cl.Net.Transport != nil {
+			_ = cl.Net.Transport.Close() // omit close error
 		}
 
 		if err != nil {
@@ -432,103 +434,52 @@ func (cl *Client) IsTakenOver() bool {
 }
 
 // ReadFixedHeader reads in the values of the next packet's fixed header.
+// ReadFixedHeader reads in the values of the next packet's fixed header.
 func (cl *Client) ReadFixedHeader(fh *packets.FixedHeader) error {
-	if cl.Net.bconn == nil {
-		return ErrConnectionClosed
+	if cl.Net.Transport == nil {
+		return transport.ErrConnectionClosed
 	}
 
-	b, err := cl.Net.bconn.ReadByte()
+	maxPacketSize := cl.ops.options.Capabilities.MaximumPacketSize
+	decodedFh, bytesRead, err := cl.Net.Transport.ReadFixedHeader(maxPacketSize)
 	if err != nil {
 		return err
 	}
 
-	err = fh.Decode(b)
-	if err != nil {
-		return err
-	}
-
-	var bu int
-	fh.Remaining, bu, err = packets.DecodeLength(cl.Net.bconn)
-	if err != nil {
-		return err
-	}
-
-	if cl.ops.options.Capabilities.MaximumPacketSize > 0 && uint32(fh.Remaining+1) > cl.ops.options.Capabilities.MaximumPacketSize {
-		return packets.ErrPacketTooLarge // [MQTT-3.2.2-15]
-	}
-
-	atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bu+1))
+	*fh = decodedFh
+	atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bytesRead))
 	return nil
 }
 
 // ReadPacket reads the remaining buffer into an MQTT packet.
 func (cl *Client) ReadPacket(fh *packets.FixedHeader) (pk packets.Packet, err error) {
+	if cl.Net.Transport == nil {
+		return pk, transport.ErrConnectionClosed
+	}
+
+	decodedPk, bytesRead, err := cl.Net.Transport.ReadPacket(fh, cl.Properties.ProtocolVersion)
+	if err != nil {
+		return pk, err
+	}
+
+	pk = decodedPk
+	atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bytesRead))
 	atomic.AddInt64(&cl.ops.info.PacketsReceived, 1)
-
-	pk.ProtocolVersion = cl.Properties.ProtocolVersion // inherit client protocol version for decoding
-	pk.FixedHeader = *fh
-	p := make([]byte, pk.FixedHeader.Remaining)
-	n, err := io.ReadFull(cl.Net.bconn, p)
-	if err != nil {
-		return pk, err
-	}
-
-	atomic.AddInt64(&cl.ops.info.BytesReceived, int64(n))
-
-	// Decode the remaining packet values using a fresh copy of the bytes,
-	// otherwise the next packet will change the data of this one.
-	px := append([]byte{}, p[:]...)
-	switch pk.FixedHeader.Type {
-	case packets.Connect:
-		err = pk.ConnectDecode(px)
-	case packets.Disconnect:
-		err = pk.DisconnectDecode(px)
-	case packets.Connack:
-		err = pk.ConnackDecode(px)
-	case packets.Publish:
-		err = pk.PublishDecode(px)
-		if err == nil {
-			atomic.AddInt64(&cl.ops.info.MessagesReceived, 1)
-		}
-	case packets.Puback:
-		err = pk.PubackDecode(px)
-	case packets.Pubrec:
-		err = pk.PubrecDecode(px)
-	case packets.Pubrel:
-		err = pk.PubrelDecode(px)
-	case packets.Pubcomp:
-		err = pk.PubcompDecode(px)
-	case packets.Subscribe:
-		err = pk.SubscribeDecode(px)
-	case packets.Suback:
-		err = pk.SubackDecode(px)
-	case packets.Unsubscribe:
-		err = pk.UnsubscribeDecode(px)
-	case packets.Unsuback:
-		err = pk.UnsubackDecode(px)
-	case packets.Pingreq:
-	case packets.Pingresp:
-	case packets.Auth:
-		err = pk.AuthDecode(px)
-	default:
-		err = fmt.Errorf("invalid packet type; %v", pk.FixedHeader.Type)
-	}
-
-	if err != nil {
-		return pk, err
+	if pk.FixedHeader.Type == packets.Publish {
+		atomic.AddInt64(&cl.ops.info.MessagesReceived, 1)
 	}
 
 	pk, err = cl.ops.hooks.OnPacketRead(cl, pk)
-	return
+	return pk, err
 }
 
 // WritePacket encodes and writes a packet to the client.
 func (cl *Client) WritePacket(pk packets.Packet) error {
 	if cl.Closed() {
-		return ErrConnectionClosed
+		return transport.ErrConnectionClosed
 	}
 
-	if cl.Net.Conn == nil {
+	if cl.Net.Transport == nil {
 		return nil
 	}
 
@@ -602,32 +553,10 @@ func (cl *Client) WritePacket(pk packets.Packet) error {
 	n, err := func() (int64, error) {
 		cl.Lock()
 		defer cl.Unlock()
-		if len(cl.State.outbound) == 0 {
-			if cl.Net.outbuf == nil {
-				return buf.WriteTo(cl.Net.Conn)
-			}
-
-			// first write to buffer, then flush buffer
-			n, _ := cl.Net.outbuf.Write(buf.Bytes()) // will always be successful
-			err = cl.flushOutbuf()
-			return int64(n), err
+		if cl.Net.Transport != nil {
+			return cl.Net.Transport.Write(buf, len(cl.State.outbound), cl.ops.options.ClientNetWriteBufferSize)
 		}
-
-		// there are more writes in the queue
-		if cl.Net.outbuf == nil {
-			if buf.Len() >= cl.ops.options.ClientNetWriteBufferSize {
-				return buf.WriteTo(cl.Net.Conn)
-			}
-			cl.Net.outbuf = new(bytes.Buffer)
-		}
-
-		n, _ := cl.Net.outbuf.Write(buf.Bytes()) // will always be successful
-		if cl.Net.outbuf.Len() < cl.ops.options.ClientNetWriteBufferSize {
-			return int64(n), nil
-		}
-
-		err = cl.flushOutbuf()
-		return int64(n), err
+		return 0, nil
 	}()
 	if err != nil {
 		return err
@@ -645,13 +574,8 @@ func (cl *Client) WritePacket(pk packets.Packet) error {
 }
 
 func (cl *Client) flushOutbuf() (err error) {
-	if cl.Net.outbuf == nil {
-		return
+	if cl.Net.Transport != nil {
+		return cl.Net.Transport.Flush()
 	}
-
-	_, err = cl.Net.outbuf.WriteTo(cl.Net.Conn)
-	if err == nil {
-		cl.Net.outbuf = nil
-	}
-	return
+	return nil
 }

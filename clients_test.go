@@ -12,13 +12,16 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/mochi-mqtt/server/v2/system"
+	"github.com/mochi-mqtt/server/v2/transport"
 
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +33,7 @@ var errClientStop = errors.New("test stop")
 func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 	r, w = net.Pipe()
 
-	cl = newClient(w, &ops{
+	cl = newTcpClient(w, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
 		log:   logger,
@@ -46,16 +49,19 @@ func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 	})
 
 	cl.ID = "mochi"
-	cl.State.Inflight.sendQuotaState.maximum = 5
-	cl.State.Inflight.sendQuotaState.value = 5
-	cl.State.Inflight.receiveQuotaState.maximum = 10
-	cl.State.Inflight.receiveQuotaState.value = 10
+	cl.State.Inflight.ResetSendQuota(5)
+	cl.State.Inflight.ResetReceiveQuota(10)
 	cl.Properties.Props.TopicAliasMaximum = 0
 	cl.Properties.Props.RequestResponseInfo = 0x1
 
 	go cl.WriteLoop()
 
 	return
+}
+
+func setTestInflightQuotas(i *Inflight, send, receive int32) {
+	i.sendQuotaState.set(send, i.MaximumSendQuota())
+	i.receiveQuotaState.set(receive, i.MaximumReceiveQuota())
 }
 
 func TestNewInflights(t *testing.T) {
@@ -107,6 +113,7 @@ func TestClientsLen(t *testing.T) {
 	require.Equal(t, 2, cl.Len())
 }
 
+
 func TestClientsDelete(t *testing.T) {
 	cl := NewClients()
 	cl.Add(&Client{ID: "t1"})
@@ -140,8 +147,10 @@ func TestNewClient(t *testing.T) {
 	require.NotNil(t, cl.State.TopicAliases)
 	require.Equal(t, defaultKeepalive, cl.State.Keepalive)
 	require.Equal(t, defaultClientProtocolVersion, cl.Properties.ProtocolVersion)
-	require.NotNil(t, cl.Net.Conn)
-	require.NotNil(t, cl.Net.bconn)
+	require.NotNil(t, cl.Net.Transport)
+	tcpTr, ok := cl.Net.Transport.(*transport.TCPTransport)
+	require.True(t, ok)
+	require.NotNil(t, tcpTr.Bconn)
 	require.NotNil(t, cl.ops)
 	require.NotNil(t, cl.ops.options.Capabilities)
 	require.False(t, cl.Net.Inline)
@@ -436,7 +445,7 @@ func TestClientResendInflightMessagesNoMessages(t *testing.T) {
 func TestClientRefreshDeadline(t *testing.T) {
 	cl, _, _ := newTestClient()
 	cl.refreshDeadline(10)
-	require.NotNil(t, cl.Net.Conn) // how do we check net.Conn deadline?
+	require.NotNil(t, cl.Net.Transport.UnderlyingConn()) // how do we check net.Conn deadline?
 }
 
 func TestClientReadFixedHeader(t *testing.T) {
@@ -616,11 +625,11 @@ func TestClientReadFixedHeaderError(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	cl.Net.bconn = nil
+	cl.Net.Transport = nil
 	fh := new(packets.FixedHeader)
 	err := cl.ReadFixedHeader(fh)
 	require.Error(t, err)
-	require.ErrorIs(t, ErrConnectionClosed, err)
+	require.ErrorIs(t, transport.ErrConnectionClosed, err)
 }
 
 func TestClientReadReadHandlerErr(t *testing.T) {
@@ -711,7 +720,7 @@ func TestClientReadPacket(t *testing.T) {
 
 func TestClientReadPacketInvalidTypeError(t *testing.T) {
 	cl, _, _ := newTestClient()
-	_ = cl.Net.Conn.Close()
+	_ = cl.Net.Transport.Close()
 	_, err := cl.ReadPacket(&packets.FixedHeader{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid packet type")
@@ -735,7 +744,7 @@ func TestClientWritePacket(t *testing.T) {
 		require.NoError(t, err, pkInfo, tt.Case, tt.Desc)
 
 		time.Sleep(2 * time.Millisecond)
-		_ = cl.Net.Conn.Close()
+		_ = cl.Net.Transport.Close()
 
 		require.Equal(t, tt.RawBytes, <-o, pkInfo, tt.Case, tt.Desc)
 
@@ -761,7 +770,7 @@ func TestClientWritePacket(t *testing.T) {
 func TestClientWritePacketBuffer(t *testing.T) {
 	r, w := net.Pipe()
 
-	cl := newClient(w, &ops{
+	cl := newTcpClient(w, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
 		log:   logger,
@@ -776,10 +785,7 @@ func TestClientWritePacketBuffer(t *testing.T) {
 	})
 
 	cl.ID = "mochi"
-	cl.State.Inflight.sendQuotaState.maximum = 5
-	cl.State.Inflight.sendQuotaState.value = 5
-	cl.State.Inflight.receiveQuotaState.maximum = 10
-	cl.State.Inflight.receiveQuotaState.value = 10
+	setTestInflightQuotas(cl.State.Inflight, 5, 10)
 	cl.Properties.Props.TopicAliasMaximum = 0
 	cl.Properties.Props.RequestResponseInfo = 0x1
 
@@ -816,7 +822,7 @@ func TestClientWritePacketBuffer(t *testing.T) {
 				err := cl.WritePacket(*pk)
 				require.NoError(t, err, "index: %d", i)
 				if i == len(tt)-1 {
-					cl.Net.Conn.Close()
+					cl.Net.Transport.Close()
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -897,7 +903,7 @@ func TestClientWritePacketWriteNoConn(t *testing.T) {
 
 func TestClientWritePacketWriteError(t *testing.T) {
 	cl, _, _ := newTestClient()
-	_ = cl.Net.Conn.Close()
+	_ = cl.Net.Transport.Close()
 
 	err := cl.WritePacket(*pkTable[1].Packet)
 	require.Error(t, err)
@@ -935,3 +941,98 @@ var (
 		packets.TPacketData[packets.Auth].Get(packets.TAuth),
 	}
 )
+
+// TestClientsGetByListenerConcurrentWithWrite 测试 GetByListener 在并发写入时不会死锁
+// 这是对 commit 8278a78 修复的嵌套读锁死锁问题的回归测试
+func TestClientsGetByListenerConcurrentWithWrite(t *testing.T) {
+	cl := NewClients()
+
+	for i := 0; i < 25; i++ {
+		cl.Add(&Client{
+			ID:    "seed-" + strconv.Itoa(i),
+			State: ClientState{open: context.Background()},
+			Net: ClientConnection{
+				Listener: "listener1",
+			},
+		})
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 200; j++ {
+				_ = cl.GetByListener("listener1")
+			}
+		}()
+	}
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 200; j++ {
+				clientID := "writer-" + strconv.Itoa(id) + "-" + strconv.Itoa(j)
+				cl.Add(&Client{
+					ID:    clientID,
+					State: ClientState{open: context.Background()},
+					Net: ClientConnection{
+						Listener: "listener2",
+					},
+				})
+				cl.Delete(clientID)
+			}
+		}(i)
+	}
+
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	close(start)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("测试超时，可能存在死锁")
+	}
+
+	require.Len(t, cl.GetByListener("listener1"), 25)
+}
+
+// TestClientsGetByListenerRaceCondition 使用 race detector 检测竞态条件
+func TestClientsGetByListenerRaceCondition(t *testing.T) {
+	cl := NewClients()
+
+	var wg sync.WaitGroup
+
+	// 并发添加和查询
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+
+		go func(id int) {
+			defer wg.Done()
+			cl.Add(&Client{
+				ID:    string(rune('a' + id)),
+				State: ClientState{open: context.Background()},
+				Net: ClientConnection{
+					Listener: "test",
+				},
+			})
+		}(i)
+
+		go func() {
+			defer wg.Done()
+			_ = cl.GetByListener("test")
+		}()
+	}
+
+	wg.Wait()
+}

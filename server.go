@@ -1135,7 +1135,7 @@ func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packet
 		}
 	}
 
-	if cl.Net.Conn == nil || cl.Closed() {
+	if cl.Net.Transport == nil || cl.Closed() {
 		return out, packets.CodeDisconnect
 	}
 
@@ -1447,6 +1447,7 @@ func (s *Server) processDisconnect(cl *Client, pk packets.Packet) error {
 	}
 
 	s.loop.willDelayed.Delete(cl.ID) // [MQTT-3.1.3-9] [MQTT-3.1.2-8]
+	cl.Properties.Will = Will{}      // Clear LWT to prevent execution (Delete Will from server's records) [MQTT-3.14.4-3]
 	cl.Stop(packets.CodeDisconnect)  // [MQTT-3.14.4-2]
 
 	return nil

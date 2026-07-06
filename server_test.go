@@ -20,6 +20,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/mochi-mqtt/server/v2/system"
+	"github.com/mochi-mqtt/server/v2/transport"
 
 	"github.com/stretchr/testify/require"
 )
@@ -181,8 +182,10 @@ func TestServerNewClient(t *testing.T) {
 	require.NotNil(t, cl.State.TopicAliases)
 	require.Equal(t, defaultKeepalive, cl.State.Keepalive)
 	require.Equal(t, defaultClientProtocolVersion, cl.Properties.ProtocolVersion)
-	require.NotNil(t, cl.Net.Conn)
-	require.NotNil(t, cl.Net.bconn)
+	require.NotNil(t, cl.Net.Transport)
+	tcpTr, ok := cl.Net.Transport.(*transport.TCPTransport)
+	require.True(t, ok)
+	require.NotNil(t, tcpTr.Bconn)
 	require.NotNil(t, cl.ops)
 	require.Equal(t, s.Log, cl.ops.log)
 }
@@ -1215,7 +1218,7 @@ func TestInheritClientSession(t *testing.T) {
 	n := time.Now().Unix()
 
 	existing, _, _ := newTestClient()
-	existing.Net.Conn = nil
+	existing.Net.Transport = nil
 	existing.ID = "mochi"
 	existing.State.Subscriptions.Add("a/b/c", packets.Subscription{Filter: "a/b/c", Qos: 1})
 	existing.State.Inflight = NewInflights()
@@ -2156,7 +2159,7 @@ func TestPublishToClientServerTopicAlias(t *testing.T) {
 func TestPublishToClientMqtt3RetainFalseLeverageNoConn(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
-	cl.Net.Conn = nil
+	cl.Net.Transport = nil
 
 	out, err := s.publishToClient(cl, packets.Subscription{Filter: "a/b/c", RetainAsPublished: true}, *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
 	require.False(t, out.FixedHeader.Retain)
@@ -2168,7 +2171,7 @@ func TestPublishToClientMqtt5RetainAsPublishedTrueLeverageNoConn(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
 	cl.Properties.ProtocolVersion = 5
-	cl.Net.Conn = nil
+	cl.Net.Transport = nil
 
 	out, err := s.publishToClient(cl, packets.Subscription{Filter: "a/b/c", RetainAsPublished: true}, *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
 	require.True(t, out.FixedHeader.Retain)
@@ -2221,7 +2224,7 @@ func TestPublishToClientACLNotAuthorized(t *testing.T) {
 func TestPublishToClientNoConn(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
-	cl.Net.Conn = nil
+	cl.Net.Transport = nil
 
 	_, err := s.publishToClient(cl, packets.Subscription{Filter: "a/b/c"}, *packets.TPacketData[packets.Publish].Get(packets.TPublishQos1).Packet)
 	require.Error(t, err)
@@ -2674,7 +2677,7 @@ func TestServerProcessInboundQos2Flow(t *testing.T) {
 	for i, tx := range tt {
 		t.Run("qos step"+strconv.Itoa(i), func(t *testing.T) {
 			r, w = net.Pipe()
-			cl.Net.Conn = w
+			cl.Net.Transport = transport.NewTCPTransport(w, cl.ops.options.ClientNetReadBufferSize)
 
 			recv := make(chan []byte)
 			go func() { // receive the ack
@@ -2748,8 +2751,7 @@ func TestServerProcessOutboundQos2Flow(t *testing.T) {
 	for i, tx := range tt {
 		t.Run("qos step"+strconv.Itoa(i), func(t *testing.T) {
 			r, w := net.Pipe()
-			time.Sleep(time.Millisecond)
-			cl.Net.Conn = w
+			cl.Net.Transport = transport.NewTCPTransport(w, cl.ops.options.ClientNetReadBufferSize)
 
 			recv := make(chan []byte)
 			go func() { // receive the ack
