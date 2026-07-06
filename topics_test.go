@@ -105,6 +105,38 @@ func TestNewSubscriptions(t *testing.T) {
 	require.NotNil(t, s.internal)
 }
 
+func TestTopicsIndexWrapperRoutesSubscriptionsAndRetained(t *testing.T) {
+	idx := NewTopicsIndex()
+
+	require.True(t, idx.Subscribe("plain", packets.Subscription{Filter: "a/b/c", Qos: 1}))
+	require.True(t, idx.Subscribe("plus", packets.Subscription{Filter: "a/+/c", Qos: 1}))
+	require.True(t, idx.Subscribe("hash", packets.Subscription{Filter: "a/#", Qos: 1}))
+	require.True(t, idx.Subscribe("shared", packets.Subscription{Filter: SharePrefix + "/group/a/b/c", Qos: 1}))
+
+	subs := idx.Subscribers("a/b/c")
+	require.Contains(t, subs.Subscriptions, "plain")
+	require.Contains(t, subs.Subscriptions, "plus")
+	require.Contains(t, subs.Subscriptions, "hash")
+	require.Contains(t, subs.Shared, SharePrefix+"/group/a/b/c")
+
+	retained := packets.Packet{
+		FixedHeader: packets.FixedHeader{Type: packets.Publish, Retain: true},
+		TopicName:   "a/b/c",
+		Payload:     []byte("retained"),
+	}
+	require.Equal(t, int64(1), idx.RetainMessage(retained))
+	require.Equal(t, 1, idx.RetainedLen())
+
+	messages := idx.Messages("#")
+	require.Len(t, messages, 1)
+	require.Equal(t, "a/b/c", messages[0].TopicName)
+
+	retained.Payload = nil
+	require.Equal(t, int64(-1), idx.RetainMessage(retained))
+	require.Equal(t, 0, idx.RetainedLen())
+	require.Empty(t, idx.Messages("#"))
+}
+
 func TestSubscriptionsAdd(t *testing.T) {
 	s := NewSubscriptions()
 	s.Add("cl1", packets.Subscription{})
@@ -156,14 +188,14 @@ func TestSubscriptionsDelete(t *testing.T) {
 }
 
 func TestNewTopicsIndex(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	require.NotNil(t, index)
 	require.NotNil(t, index.root)
 }
 
 func BenchmarkNewTopicsIndex(b *testing.B) {
 	for n := 0; n < b.N; n++ {
-		NewTopicsIndex()
+		NewTopicsIndexShard()
 	}
 }
 
@@ -211,7 +243,7 @@ func TestSubscribe(t *testing.T) {
 		},
 	}
 
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for _, tx := range tt {
 		t.Run(tx.desc, func(t *testing.T) {
 			require.Equal(t, tx.wasNew, index.Subscribe(tx.client, tx.subscription))
@@ -226,7 +258,7 @@ func TestSubscribe(t *testing.T) {
 }
 
 func TestSubscribeShared(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Filter: SharePrefix + "/tmp/a/b/c", Qos: 2})
 	final := index.root.particles.get("a").particles.get("b").particles.get("c")
 	require.NotNil(t, final)
@@ -238,21 +270,21 @@ func TestSubscribeShared(t *testing.T) {
 }
 
 func BenchmarkSubscribe(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for n := 0; n < b.N; n++ {
 		index.Subscribe("client-1", packets.Subscription{Filter: "a/b/c"})
 	}
 }
 
 func BenchmarkSubscribeShared(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for n := 0; n < b.N; n++ {
 		index.Subscribe("client-1", packets.Subscription{Filter: "$SHARE/tmp/a/b/c"})
 	}
 }
 
 func TestUnsubscribe(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/c/d", Qos: 1})
 	client, exists := index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").subscriptions.Get("cl1")
 	require.NotNil(t, client)
@@ -298,7 +330,7 @@ func TestUnsubscribe(t *testing.T) {
 }
 
 func TestUnsubscribeNoCascade(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/c"})
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/c/e/e"})
 
@@ -312,7 +344,7 @@ func TestUnsubscribeNoCascade(t *testing.T) {
 }
 
 func TestUnsubscribeShared(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Filter: "$SHARE/tmp/a/b/c", Qos: 2})
 	final := index.root.particles.get("a").particles.get("b").particles.get("c")
 	require.NotNil(t, final)
@@ -326,7 +358,7 @@ func TestUnsubscribeShared(t *testing.T) {
 }
 
 func BenchmarkUnsubscribe(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 
 	for n := 0; n < b.N; n++ {
 		b.StopTimer()
@@ -338,7 +370,7 @@ func BenchmarkUnsubscribe(b *testing.B) {
 
 func TestIndexSeek(t *testing.T) {
 	filter := "a/b/c/d/e/f"
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	k1 := index.set(filter, 0)
 	require.Equal(t, "f", k1.key)
 	k1.subscriptions.Add("cl1", packets.Subscription{})
@@ -348,7 +380,7 @@ func TestIndexSeek(t *testing.T) {
 }
 
 func TestIndexTrim(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	k1 := index.set("a/b/c", 0)
 	require.Equal(t, "c", k1.key)
 	k1.subscriptions.Add("cl1", packets.Subscription{})
@@ -379,7 +411,7 @@ func TestIndexTrim(t *testing.T) {
 }
 
 func TestIndexSet(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	child := index.set("a/b/c", 0)
 	require.Equal(t, "c", child.key)
 	require.NotNil(t, index.root.particles.get("a").particles.get("b").particles.get("c"))
@@ -392,14 +424,14 @@ func TestIndexSet(t *testing.T) {
 }
 
 func TestIndexSetPrefixed(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	child := index.set("/c", 0)
 	require.Equal(t, "c", child.key)
 	require.NotNil(t, index.root.particles.get("").particles.get("c"))
 }
 
 func BenchmarkIndexSet(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for n := 0; n < b.N; n++ {
 		index.set("a/b/c", 0)
 	}
@@ -412,7 +444,7 @@ func TestRetainMessage(t *testing.T) {
 		Payload:     []byte("hello"),
 	}
 
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	r := index.RetainMessage(pk)
 	require.Equal(t, int64(1), r)
 	pke, ok := index.Retained.Get(pk.TopicName)
@@ -443,7 +475,7 @@ func TestRetainMessage(t *testing.T) {
 }
 
 func BenchmarkRetainMessage(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for n := 0; n < b.N; n++ {
 		index.RetainMessage(packets.Packet{TopicName: "a/b/c/d"})
 	}
@@ -488,7 +520,7 @@ func BenchmarkIsolateParticle(b *testing.B) {
 }
 
 func TestScanSubscribers(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Qos: 1, Filter: "a/b/c", Identifier: 22})
 	index.Subscribe("cl1", packets.Subscription{Qos: 1, Filter: "a/b/c/d/e/f"})
 	index.Subscribe("cl1", packets.Subscription{Qos: 2, Filter: "a/b/c/d/+/f"})
@@ -528,7 +560,7 @@ func TestScanSubscribers(t *testing.T) {
 }
 
 func TestScanSubscribersTopicInheritanceBug(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Qos: 0, Filter: "a/b/c"})
 	index.Subscribe("cl2", packets.Subscription{Qos: 0, Filter: "a/b"})
 
@@ -537,7 +569,7 @@ func TestScanSubscribersTopicInheritanceBug(t *testing.T) {
 }
 
 func TestScanSubscribersShared(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Qos: 1, Filter: SharePrefix + "/tmp/a/b/c", Identifier: 111})
 	index.Subscribe("cl2", packets.Subscription{Qos: 0, Filter: SharePrefix + "/tmp/a/b/c", Identifier: 112})
 	index.Subscribe("cl3", packets.Subscription{Qos: 0, Filter: SharePrefix + "/tmp2/a/b/c", Identifier: 113})
@@ -550,7 +582,7 @@ func TestScanSubscribersShared(t *testing.T) {
 }
 
 func TestSelectSharedSubscriber(t *testing.T) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Qos: 1, Filter: SharePrefix + "/tmp/a/b/c", Identifier: 110})
 	index.Subscribe("cl1b", packets.Subscription{Qos: 0, Filter: SharePrefix + "/tmp/a/b/c", Identifier: 111})
 	index.Subscribe("cl2", packets.Subscription{Qos: 0, Filter: SharePrefix + "/tmp/a/b/c", Identifier: 112})
@@ -616,7 +648,7 @@ func TestSubscribersFind(t *testing.T) {
 
 	for _, tx := range tt {
 		t.Run("filter:'"+tx.filter+"' vs topic:'"+tx.topic+"'", func(t *testing.T) {
-			index := NewTopicsIndex()
+			index := NewTopicsIndexShard()
 			index.Subscribe("cl1", packets.Subscription{Filter: tx.filter})
 			subs := index.Subscribers(tx.topic)
 			require.Equal(t, tx.matched, len(subs.Subscriptions) == 1)
@@ -625,7 +657,7 @@ func TestSubscribersFind(t *testing.T) {
 }
 
 func BenchmarkSubscribers(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/c"})
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/+/c"})
 	index.Subscribe("cl1", packets.Subscription{Filter: "a/b/c/+"})
@@ -671,7 +703,7 @@ func TestMessagesPattern(t *testing.T) {
 		{"#", 6},
 	}
 
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for _, pk := range pks {
 		index.RetainMessage(pk)
 	}
@@ -685,7 +717,7 @@ func TestMessagesPattern(t *testing.T) {
 }
 
 func BenchmarkMessages(b *testing.B) {
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.RetainMessage(packets.Packet{TopicName: "a/b/c/d"})
 	index.RetainMessage(packets.Packet{TopicName: "a/b/d/e/f"})
 	index.RetainMessage(packets.Packet{TopicName: "d/e/f/g"})
@@ -993,7 +1025,7 @@ func TestInlineSubscribe(t *testing.T) {
 		},
 	}
 
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	for _, tx := range tt {
 		t.Run(tx.desc, func(t *testing.T) {
 			require.Equal(t, tx.wasNew, index.InlineSubscribe(tx.subscription))
@@ -1009,13 +1041,13 @@ func TestInlineUnsubscribe(t *testing.T) {
 		// handler logic
 	}
 
-	index := NewTopicsIndex()
+	index := NewTopicsIndexShard()
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "a/b/c/d", Identifier: 1}})
 	sub, exists := index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
 	require.True(t, exists)
 
-	index = NewTopicsIndex()
+	index = NewTopicsIndexShard()
 	index.InlineSubscribe(InlineSubscription{Handler: handler, Subscription: packets.Subscription{Filter: "a/b/c/d", Identifier: 1}})
 	sub, exists = index.root.particles.get("a").particles.get("b").particles.get("c").particles.get("d").inlineSubscriptions.Get(1)
 	require.NotNil(t, sub)
