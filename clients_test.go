@@ -54,7 +54,13 @@ func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 	cl.Properties.Props.TopicAliasMaximum = 0
 	cl.Properties.Props.RequestResponseInfo = 0x1
 
-	go cl.WriteLoop()
+	if cl.Net.Transport != nil {
+		_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
+		if !isNetpoll {
+			go cl.WriteLoop()
+		}
+	}
+
 
 	return
 }

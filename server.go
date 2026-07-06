@@ -435,7 +435,13 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 	defer s.Listeners.ClientsWg.Done()
 	s.Listeners.ClientsWg.Add(1)
 
-	go cl.WriteLoop()
+	if cl.Net.Transport != nil {
+		_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
+		if !isNetpoll {
+			go cl.WriteLoop()
+		}
+	}
+
 	defer cl.Stop(nil)
 
 	pk, err := s.readConnectionPacket(cl)

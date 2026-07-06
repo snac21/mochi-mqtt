@@ -99,8 +99,10 @@ func TestInheritClientSessionRestoresInflightQuotas(t *testing.T) {
 	s := newServer()
 	s.Options.Capabilities.ReceiveMaximum = 6
 
-	existing, _, _ := newTestClient()
-	existing.Closed()
+	existing, r, _ := newTestClient()
+	existing.Stop(nil)
+	r.Close() // Close the pipe to ensure WriteLoop exits
+	time.Sleep(10 * time.Millisecond) // Wait for WriteLoop to fully exit
 	existing.ops.options.Capabilities.ReceiveMaximum = 6
 	existing.Net.Transport = nil
 	existing.ID = "client-quota-inherit"

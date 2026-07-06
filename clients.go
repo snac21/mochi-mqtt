@@ -219,10 +219,6 @@ func newNetpollClient(c netpoll.Connection, o *ops) *Client {
 
 // WriteLoop ranges over pending outbound messages and writes them to the client connection.
 func (cl *Client) WriteLoop() {
-	_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
-	if isNetpoll {
-		return
-	}
 	for {
 		select {
 		case pk := <-cl.State.outbound:
