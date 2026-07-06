@@ -266,6 +266,7 @@ func (s *Server) AddHook(hook Hook, config any) error {
 	nl := s.Log.With("hook", hook.ID())
 	hook.SetOpts(nl, &HookOptions{
 		Capabilities: s.Options.Capabilities,
+		Server:       s,
 	})
 
 	s.Log.Info("added hook", "hook", hook.ID())
