@@ -51,7 +51,7 @@ func TestInheritClientSession(t *testing.T) {
 
 func TestServerImportSessionNilInputs(t *testing.T) {
 	s := newServer()
-	cl := s.NewClient(nil, "test", "client-nil", false)
+	cl := s.NewTcpClient(nil, "test", "client-nil", false)
 
 	require.NoError(t, s.ImportSession(nil, nil))
 	require.NoError(t, s.ImportSession(cl, nil))
@@ -70,7 +70,7 @@ func TestServerImportSessionRestoresInflightQuotas(t *testing.T) {
 	s := newServer()
 	s.Options.Capabilities.ReceiveMaximum = 7
 
-	cl := s.NewClient(nil, "test", "client-quota", false)
+	cl := s.NewTcpClient(nil, "test", "client-quota", false)
 	cl.ID = "client-quota"
 	cl.Properties.Props.ReceiveMaximum = 3
 
@@ -101,7 +101,7 @@ func TestInheritClientSessionRestoresInflightQuotas(t *testing.T) {
 
 	existing, r, _ := newTestClient()
 	existing.Stop(nil)
-	r.Close() // Close the pipe to ensure WriteLoop exits
+	r.Close()                         // Close the pipe to ensure WriteLoop exits
 	time.Sleep(10 * time.Millisecond) // Wait for WriteLoop to fully exit
 	existing.ops.options.Capabilities.ReceiveMaximum = 6
 	existing.Net.Transport = nil
@@ -134,7 +134,7 @@ func TestInheritClientSessionRestoresInflightQuotas(t *testing.T) {
 
 func TestServerImportSession(t *testing.T) {
 	s := newServer()
-	cl := s.NewClient(nil, "test", "client-2", false)
+	cl := s.NewTcpClient(nil, "test", "client-2", false)
 	cl.ID = "client-2"
 
 	snapshot := &SessionSnapshot{

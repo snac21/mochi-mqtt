@@ -201,7 +201,7 @@ func New(opts *Options) *Server {
 	}
 
 	if s.Options.InlineClient {
-		s.inlineClient = s.NewClient(nil, LocalListener, InlineClientId, true)
+		s.inlineClient = s.NewTcpClient(nil, LocalListener, InlineClientId, true)
 		s.Clients.Add(s.inlineClient)
 	}
 
@@ -238,12 +238,12 @@ func (o *Options) ensureDefaults() {
 	}
 }
 
-// NewClient returns a new Client instance, populated with all the required values and
+// NewTcpClient returns a new Client instance, populated with all the required values and
 // references to be used with the server. If you are using this client to directly publish
 // messages from the embedding application, set the inline flag to true to bypass ACL and
 // topic validation checks.
-func (s *Server) NewClient(c net.Conn, listener string, id string, inline bool) *Client {
-	cl := newClient(c, &ops{ // [MQTT-3.1.2-6] implicit
+func (s *Server) NewTcpClient(c net.Conn, listener string, id string, inline bool) *Client {
+	cl := newTcpClient(c, &ops{ // [MQTT-3.1.2-6] implicit
 		options: s.Options,
 		info:    s.Info,
 		hooks:   s.hooks,
@@ -425,7 +425,7 @@ func (s *Server) EstablishConnection(listener string, c net.Conn) error {
 	if npc, ok := c.(netpoll.Connection); ok {
 		return s.EstablishNetpollConnection(listener, npc)
 	}
-	cl := s.NewClient(c, listener, "", false)
+	cl := s.NewTcpClient(c, listener, "", false)
 	return s.attachClient(cl, listener)
 }
 
@@ -435,11 +435,8 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 	defer s.Listeners.ClientsWg.Done()
 	s.Listeners.ClientsWg.Add(1)
 
-	if cl.Net.Transport != nil {
-		_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
-		if !isNetpoll {
-			go cl.WriteLoop()
-		}
+	if cl.Net.Transport != nil && !cl.Net.Transport.IsEventDriven() {
+		go cl.WriteLoop()
 	}
 
 	defer cl.Stop(nil)
@@ -1191,8 +1188,7 @@ func (s *Server) enqueuePublishToClient(cl *Client, out packets.Packet, source p
 		return out, packets.CodeDisconnect
 	}
 
-	_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
-	if isNetpoll {
+	if cl.Net.Transport.IsEventDriven() {
 		err := cl.WritePacket(out)
 		if err != nil {
 			atomic.AddInt64(&s.Info.MessagesDropped, 1)
@@ -1240,8 +1236,7 @@ func (s *Server) sendQueuedMessages(cl *Client) {
 		cl.State.Inflight.Set(pk)
 		cl.State.Inflight.DecreaseSendQuota() // Decrement quota
 
-		_, isNetpoll := cl.Net.Transport.(*transport.NetpollTransport)
-		if isNetpoll {
+		if cl.Net.Transport != nil && cl.Net.Transport.IsEventDriven() {
 			if err := cl.WritePacket(pk); err != nil {
 				// Send failed, restore quota and set message back to queued state
 				cl.State.Inflight.IncreaseSendQuota()
@@ -1782,7 +1777,7 @@ func (s *Server) loadSubscriptions(v []storage.Subscription) {
 // loadClients restores clients from the datastore.
 func (s *Server) loadClients(v []storage.Client) {
 	for _, c := range v {
-		cl := s.NewClient(nil, c.Listener, c.ID, false)
+		cl := s.NewTcpClient(nil, c.Listener, c.ID, false)
 		cl.Properties.Username = c.Username
 		cl.Properties.Clean = c.Clean
 		cl.Properties.ProtocolVersion = c.ProtocolVersion
@@ -1912,6 +1907,7 @@ func minimum(a, b int64) (m int64) {
 var ErrNotEnoughData = errors.New("not enough data")
 
 func (s *Server) EstablishNetpollConnection(listener string, c netpoll.Connection) error {
+	s.Listeners.ClientsWg.Add(1)
 	cl := s.NewNetpollClient(c, listener, "", false)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1962,6 +1958,7 @@ func (s *Server) EstablishNetpollConnection(listener string, c netpoll.Connectio
 				}
 			}
 		}
+		s.Listeners.ClientsWg.Done()
 		return nil
 	})
 
@@ -1998,6 +1995,11 @@ func (s *Server) handleNetpollRequest(cl *Client, c netpoll.Connection) error {
 			return err
 		}
 		atomic.AddInt64(&cl.ops.info.BytesReceived, int64(bytesRead))
+
+		if pk.FixedHeader.Type != packets.Connect {
+			cl.Stop(packets.ErrProtocolViolationRequireFirstConnect)
+			return packets.ErrProtocolViolationRequireFirstConnect // [MQTT-3.1.0-1]
+		}
 
 		cl.ParseConnect(cl.Net.Listener, pk)
 		if atomic.LoadInt64(&s.Info.ClientsConnected) >= s.Options.Capabilities.MaximumClients {

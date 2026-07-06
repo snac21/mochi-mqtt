@@ -92,7 +92,7 @@ func TestServerNewClient(t *testing.T) {
 	s.Log = logger
 	r, _ := net.Pipe()
 
-	cl := s.NewClient(r, "testing", "test", false)
+	cl := s.NewTcpClient(r, "testing", "test", false)
 	require.NotNil(t, cl)
 	require.Equal(t, "test", cl.ID)
 	require.Equal(t, "testing", cl.Net.Listener)
@@ -112,7 +112,7 @@ func TestServerNewClient(t *testing.T) {
 
 func TestServerNewClientInline(t *testing.T) {
 	s := New(nil)
-	cl := s.NewClient(nil, "testing", "test", true)
+	cl := s.NewTcpClient(nil, "testing", "test", true)
 	require.True(t, cl.Net.Inline)
 }
 

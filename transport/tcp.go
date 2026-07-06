@@ -14,6 +14,8 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
+var _ Transport = (*TCPTransport)(nil) // compile-time interface check
+
 // TCPTransport implements the blocking I/O transport layer based on the standard library net.Conn.
 type TCPTransport struct {
 	conn   net.Conn
@@ -67,47 +69,14 @@ func (t *TCPTransport) ReadPacket(fh *packets.FixedHeader, protocolVersion byte)
 	var px []byte
 	var n int
 	if fh.Remaining > 0 {
-		p := make([]byte, fh.Remaining)
-		n, err = io.ReadFull(t.Bconn, p)
+		px = make([]byte, fh.Remaining)
+		n, err = io.ReadFull(t.Bconn, px)
 		if err != nil {
 			return pk, 0, err
 		}
-		px = append([]byte{}, p[:]...)
 	}
 
-	switch pk.FixedHeader.Type {
-	case packets.Connect:
-		err = pk.ConnectDecode(px)
-	case packets.Disconnect:
-		err = pk.DisconnectDecode(px)
-	case packets.Connack:
-		err = pk.ConnackDecode(px)
-	case packets.Publish:
-		err = pk.PublishDecode(px)
-	case packets.Puback:
-		err = pk.PubackDecode(px)
-	case packets.Pubrec:
-		err = pk.PubrecDecode(px)
-	case packets.Pubrel:
-		err = pk.PubrelDecode(px)
-	case packets.Pubcomp:
-		err = pk.PubcompDecode(px)
-	case packets.Subscribe:
-		err = pk.SubscribeDecode(px)
-	case packets.Suback:
-		err = pk.SubackDecode(px)
-	case packets.Unsubscribe:
-		err = pk.UnsubscribeDecode(px)
-	case packets.Unsuback:
-		err = pk.UnsubackDecode(px)
-	case packets.Pingreq:
-	case packets.Pingresp:
-	case packets.Auth:
-		err = pk.AuthDecode(px)
-	default:
-		err = fmt.Errorf("invalid packet type; %v", pk.FixedHeader.Type)
-	}
-
+	err = DecodePacketPayload(&pk, px)
 	return pk, n, err
 }
 
@@ -169,4 +138,8 @@ func (t *TCPTransport) SetDeadline(tim time.Time) error {
 
 func (t *TCPTransport) UnderlyingConn() any {
 	return t.conn
+}
+
+func (t *TCPTransport) IsEventDriven() bool {
+	return false
 }

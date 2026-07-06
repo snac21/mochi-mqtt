@@ -159,39 +159,11 @@ type ClientState struct {
 	ServerKeepalive   bool                 // keepalive was set by the server
 }
 
-// newClient returns a new instance of Client. This is almost exclusively used by Server
-// for creating new clients, but it lives here because it's not dependent.
-func newClient(c net.Conn, o *ops) *Client {
+// newClientBase creates and returns a new Client with common fields initialized.
+// Transport-specific setup is handled by the caller.
+func newClientBase(o *ops) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
-	cl := &Client{
-		State: ClientState{
-			Inflight:      NewInflights(),
-			Subscriptions: NewSubscriptions(),
-			TopicAliases:  NewTopicAliases(o.options.Capabilities.TopicAliasMaximum),
-			open:          ctx,
-			cancelOpen:    cancel,
-			Keepalive:     defaultKeepalive,
-			outbound:      make(chan *packets.Packet, o.options.Capabilities.MaximumClientWritesPending),
-		},
-		Properties: ClientProperties{
-			ProtocolVersion: defaultClientProtocolVersion, // default protocol version
-		},
-		ops: o,
-	}
-
-	if c != nil {
-		cl.Net = ClientConnection{
-			Transport: transport.NewTCPTransport(c, o.options.ClientNetReadBufferSize),
-			Remote:    c.RemoteAddr().String(),
-		}
-	}
-
-	return cl
-}
-
-func newNetpollClient(c netpoll.Connection, o *ops) *Client {
-	ctx, cancel := context.WithCancel(context.Background())
-	cl := &Client{
+	return &Client{
 		State: ClientState{
 			Inflight:      NewInflights(),
 			Subscriptions: NewSubscriptions(),
@@ -206,14 +178,29 @@ func newNetpollClient(c netpoll.Connection, o *ops) *Client {
 		},
 		ops: o,
 	}
+}
 
+// newTcpClient returns a new instance of Client with a TCP transport.
+func newTcpClient(c net.Conn, o *ops) *Client {
+	cl := newClientBase(o)
+	if c != nil {
+		cl.Net = ClientConnection{
+			Transport: transport.NewTCPTransport(c, o.options.ClientNetReadBufferSize),
+			Remote:    c.RemoteAddr().String(),
+		}
+	}
+	return cl
+}
+
+// newNetpollClient returns a new instance of Client with a Netpoll transport.
+func newNetpollClient(c netpoll.Connection, o *ops) *Client {
+	cl := newClientBase(o)
 	if c != nil {
 		cl.Net = ClientConnection{
 			Transport: transport.NewNetpollTransport(c),
 			Remote:    c.RemoteAddr().String(),
 		}
 	}
-
 	return cl
 }
 
@@ -603,8 +590,8 @@ func (cl *Client) WritePacket(pk packets.Packet) error {
 }
 
 func (cl *Client) flushOutbuf() (err error) {
-	if t, ok := cl.Net.Transport.(*transport.TCPTransport); ok {
-		return t.Flush()
+	if cl.Net.Transport != nil {
+		return cl.Net.Transport.Flush()
 	}
 	return nil
 }

@@ -33,7 +33,7 @@ var errClientStop = errors.New("test stop")
 func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 	r, w = net.Pipe()
 
-	cl = newClient(w, &ops{
+	cl = newTcpClient(w, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
 		log:   logger,
@@ -60,7 +60,6 @@ func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
 			go cl.WriteLoop()
 		}
 	}
-
 
 	return
 }
@@ -779,7 +778,7 @@ func TestClientWritePacket(t *testing.T) {
 func TestClientWritePacketBuffer(t *testing.T) {
 	r, w := net.Pipe()
 
-	cl := newClient(w, &ops{
+	cl := newTcpClient(w, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
 		log:   logger,

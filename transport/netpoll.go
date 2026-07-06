@@ -13,6 +13,8 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
+var _ Transport = (*NetpollTransport)(nil) // compile-time interface check
+
 // NetpollTransport implements the non-blocking/event-driven transport layer based on cloudwego/netpoll.
 type NetpollTransport struct {
 	npConn netpoll.Connection
@@ -96,39 +98,7 @@ func (t *NetpollTransport) ReadPacketDirect(protocolVersion byte, maxPacketSize 
 	pxUsed := make([]byte, len(px))
 	copy(pxUsed, px)
 
-	switch pk.FixedHeader.Type {
-	case packets.Connect:
-		err = pk.ConnectDecode(pxUsed)
-	case packets.Disconnect:
-		err = pk.DisconnectDecode(pxUsed)
-	case packets.Connack:
-		err = pk.ConnackDecode(pxUsed)
-	case packets.Publish:
-		err = pk.PublishDecode(pxUsed)
-	case packets.Puback:
-		err = pk.PubackDecode(pxUsed)
-	case packets.Pubrec:
-		err = pk.PubrecDecode(pxUsed)
-	case packets.Pubrel:
-		err = pk.PubrelDecode(pxUsed)
-	case packets.Pubcomp:
-		err = pk.PubcompDecode(pxUsed)
-	case packets.Subscribe:
-		err = pk.SubscribeDecode(pxUsed)
-	case packets.Suback:
-		err = pk.SubackDecode(pxUsed)
-	case packets.Unsubscribe:
-		err = pk.UnsubscribeDecode(pxUsed)
-	case packets.Unsuback:
-		err = pk.UnsubackDecode(pxUsed)
-	case packets.Pingreq:
-	case packets.Pingresp:
-	case packets.Auth:
-		err = pk.AuthDecode(pxUsed)
-	default:
-		err = fmt.Errorf("invalid packet type; %v", pk.FixedHeader.Type)
-	}
-
+	err = DecodePacketPayload(&pk, pxUsed)
 	return pk, totalPacketLen, err
 }
 
@@ -157,4 +127,12 @@ func (t *NetpollTransport) SetDeadline(tim time.Time) error {
 
 func (t *NetpollTransport) UnderlyingConn() any {
 	return t.npConn
+}
+
+func (t *NetpollTransport) IsEventDriven() bool {
+	return true
+}
+
+func (t *NetpollTransport) Flush() error {
+	return nil
 }

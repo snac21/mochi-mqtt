@@ -1034,7 +1034,7 @@ func TestPublishToClientExceedClientWritesPending(t *testing.T) {
 	s := newServer()
 
 	_, w := net.Pipe()
-	cl := newClient(w, &ops{
+	cl := newTcpClient(w, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
 		log:   logger,
@@ -1224,7 +1224,7 @@ func TestPublishToSubscribersExhaustedSendQuota(t *testing.T) {
 
 func TestSendQueuedMessagesRespectsSendQuota(t *testing.T) {
 	s := newServer()
-	cl := newClient(nil, &ops{
+	cl := newTcpClient(nil, &ops{
 		info:  new(system.Info),
 		hooks: new(Hooks),
 		log:   logger,
