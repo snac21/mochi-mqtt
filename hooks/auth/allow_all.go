@@ -5,6 +5,7 @@
 package auth
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"bytes"
 
 	"github.com/mochi-mqtt/server/v2"
@@ -31,11 +32,11 @@ func (h *AllowHook) Provides(b byte) bool {
 }
 
 // OnConnectAuthenticate returns true/allowed for all requests.
-func (h *AllowHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
+func (h *AllowHook) OnConnectAuthenticate(cl clt.Client, pk packets.Packet) bool {
 	return true
 }
 
 // OnACLCheck returns true/allowed for all checks.
-func (h *AllowHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
+func (h *AllowHook) OnACLCheck(cl clt.Client, topic string, write bool) bool {
 	return true
 }

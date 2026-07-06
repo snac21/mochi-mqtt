@@ -5,6 +5,7 @@
 package pebble
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"log/slog"
 	"os"
 	"strings"
@@ -22,13 +23,13 @@ import (
 var (
 	logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	client = &mqtt.Client{
+	client = &clt.BaseClient{
 		ID: "test",
-		Net: mqtt.ClientConnection{
+		Net: clt.ClientConnection{
 			Remote:   "test.addr",
 			Listener: "listener",
 		},
-		Properties: mqtt.ClientProperties{
+		Properties: clt.ClientProperties{
 			Username: []byte("username"),
 			Clean:    false,
 		},
@@ -62,12 +63,12 @@ func TestKeyUpperBound(t *testing.T) {
 }
 
 func TestClientKey(t *testing.T) {
-	k := clientKey(&mqtt.Client{ID: "cl1"})
+	k := clientKey(&clt.BaseClient{ID: "cl1"})
 	require.Equal(t, storage.ClientKey+"_cl1", k)
 }
 
 func TestSubscriptionKey(t *testing.T) {
-	k := subscriptionKey(&mqtt.Client{ID: "cl1"}, "a/b/c")
+	k := subscriptionKey(&clt.BaseClient{ID: "cl1"}, "a/b/c")
 	require.Equal(t, storage.SubscriptionKey+"_cl1:a/b/c", k)
 }
 
@@ -77,7 +78,7 @@ func TestRetainedKey(t *testing.T) {
 }
 
 func TestInflightKey(t *testing.T) {
-	k := inflightKey(&mqtt.Client{ID: "cl1"}, packets.Packet{PacketID: 1})
+	k := inflightKey(&clt.BaseClient{ID: "cl1"}, packets.Packet{PacketID: 1})
 	require.Equal(t, storage.InflightKey+"_cl1:1", k)
 }
 
@@ -181,7 +182,7 @@ func TestOnClientExpired(t *testing.T) {
 	require.NoError(t, err)
 	defer teardown(t, h.config.Path, h)
 
-	cl := &mqtt.Client{ID: "cl1"}
+	cl := &clt.BaseClient{ID: "cl1"}
 	clientKey := clientKey(cl)
 
 	err = h.setKv(clientKey, &storage.Client{ID: cl.ID})
@@ -268,13 +269,13 @@ func TestOnDisconnectSessionTakenOver(t *testing.T) {
 	err := h.Init(nil)
 	require.NoError(t, err)
 
-	testClient := &mqtt.Client{
+	testClient := &clt.BaseClient{
 		ID: "test",
-		Net: mqtt.ClientConnection{
+		Net: clt.ClientConnection{
 			Remote:   "test.addr",
 			Listener: "listener",
 		},
-		Properties: mqtt.ClientProperties{
+		Properties: clt.ClientProperties{
 			Username: []byte("username"),
 			Clean:    false,
 		},

@@ -5,6 +5,7 @@
 package auth
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"bytes"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
@@ -76,27 +77,27 @@ func (h *Hook) Init(config any) error {
 
 // OnConnectAuthenticate returns true if the connecting client has rules which provide access
 // in the auth ledger.
-func (h *Hook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
+func (h *Hook) OnConnectAuthenticate(cl clt.Client, pk packets.Packet) bool {
 	if _, ok := h.ledger.AuthOk(cl, pk); ok {
 		return true
 	}
 
 	h.Log.Info("client failed authentication check",
 		"username", string(pk.Connect.Username),
-		"remote", cl.Net.Remote)
+		"remote", cl.GetConnection().Remote)
 	return false
 }
 
 // OnACLCheck returns true if the connecting client has matching read or write access to subscribe
 // or publish to a given topic.
-func (h *Hook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
+func (h *Hook) OnACLCheck(cl clt.Client, topic string, write bool) bool {
 	if _, ok := h.ledger.ACLOk(cl, topic, write); ok {
 		return true
 	}
 
 	h.Log.Debug("client failed allowed ACL check",
-		"client", cl.ID,
-		"username", string(cl.Properties.Username),
+		"client", cl.GetID(),
+		"username", string(cl.GetProperties().Username),
 		"topic", topic)
 
 	return false

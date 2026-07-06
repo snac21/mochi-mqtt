@@ -5,6 +5,7 @@
 package main
 
 import (
+	"github.com/mochi-mqtt/server/v2/client"
 	"log"
 	"os"
 	"os/signal"
@@ -48,8 +49,8 @@ func main() {
 		_ = server.Publish("direct/alternate/retained", []byte("some other retained message"), true, 0)
 
 		// Subscribe to a filter and handle any received messages via a callback function.
-		callbackFn := func(cl *mqtt.Client, sub packets.Subscription, pk packets.Packet) {
-			server.Log.Info("inline client received message from subscription", "client", cl.ID, "subscriptionId", sub.Identifier, "topic", pk.TopicName, "payload", string(pk.Payload))
+		callbackFn := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
+			server.Log.Info("inline client received message from subscription", "client", cl.GetID(), "subscriptionId", sub.Identifier, "topic", pk.TopicName, "payload", string(pk.Payload))
 		}
 		server.Log.Info("inline client subscribing")
 		_ = server.Subscribe("direct/#", 1, callbackFn)

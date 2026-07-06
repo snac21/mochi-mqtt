@@ -5,11 +5,10 @@
 package mqtt
 
 import (
+	"github.com/mochi-mqtt/server/v2/client"
+	"github.com/mochi-mqtt/server/v2/packets"
 	"strings"
 	"sync"
-	"sync/atomic"
-
-	"github.com/mochi-mqtt/server/v2/packets"
 )
 
 var (
@@ -18,91 +17,6 @@ var (
 )
 
 // TopicAliases contains inbound and outbound topic alias registrations.
-type TopicAliases struct {
-	Inbound  *InboundTopicAliases
-	Outbound *OutboundTopicAliases
-}
-
-// NewTopicAliases returns an instance of TopicAliases.
-func NewTopicAliases(topicAliasMaximum uint16) TopicAliases {
-	return TopicAliases{
-		Inbound:  NewInboundTopicAliases(topicAliasMaximum),
-		Outbound: NewOutboundTopicAliases(topicAliasMaximum),
-	}
-}
-
-// NewInboundTopicAliases returns a pointer to InboundTopicAliases.
-func NewInboundTopicAliases(topicAliasMaximum uint16) *InboundTopicAliases {
-	return &InboundTopicAliases{
-		maximum:  topicAliasMaximum,
-		internal: map[uint16]string{},
-	}
-}
-
-// InboundTopicAliases contains a map of topic aliases received from the client.
-type InboundTopicAliases struct {
-	internal map[uint16]string
-	sync.RWMutex
-	maximum uint16
-}
-
-// Set sets a new alias for a specific topic.
-func (a *InboundTopicAliases) Set(id uint16, topic string) string {
-	a.Lock()
-	defer a.Unlock()
-
-	if a.maximum == 0 {
-		return topic // ?
-	}
-
-	if existing, ok := a.internal[id]; ok && topic == "" {
-		return existing
-	}
-
-	a.internal[id] = topic
-	return topic
-}
-
-// OutboundTopicAliases contains a map of topic aliases sent from the broker to the client.
-type OutboundTopicAliases struct {
-	internal map[string]uint16
-	sync.RWMutex
-	cursor  uint32
-	maximum uint16
-}
-
-// NewOutboundTopicAliases returns a pointer to OutboundTopicAliases.
-func NewOutboundTopicAliases(topicAliasMaximum uint16) *OutboundTopicAliases {
-	return &OutboundTopicAliases{
-		maximum:  topicAliasMaximum,
-		internal: map[string]uint16{},
-	}
-}
-
-// Set sets a new topic alias for a topic and returns the alias value, and a boolean
-// indicating if the alias already existed.
-func (a *OutboundTopicAliases) Set(topic string) (uint16, bool) {
-	a.Lock()
-	defer a.Unlock()
-
-	if a.maximum == 0 {
-		return 0, false
-	}
-
-	if i, ok := a.internal[topic]; ok {
-		return i, true
-	}
-
-	i := atomic.LoadUint32(&a.cursor)
-	if i+1 > uint32(a.maximum) {
-		// if i+1 > math.MaxUint16 {
-		return 0, false
-	}
-
-	a.internal[topic] = uint16(i) + 1
-	atomic.StoreUint32(&a.cursor, i+1)
-	return uint16(i) + 1, false
-}
 
 // SharedSubscriptions contains a map of subscriptions to a shared filter,
 // keyed on share group then client id.
@@ -189,7 +103,7 @@ func (s *SharedSubscriptions) GetAll() map[string]map[string]packets.Subscriptio
 // InlineSubFn is the signature for a callback function which will be called
 // when an inline client receives a message on a topic it is subscribed to.
 // The sub argument contains information about the subscription that was matched for any filters.
-type InlineSubFn func(cl *Client, sub packets.Subscription, pk packets.Packet)
+type InlineSubFn func(cl client.Client, sub packets.Subscription, pk packets.Packet)
 
 // InlineSubscriptions represents a map of internal subscriptions keyed on client.
 type InlineSubscriptions struct {

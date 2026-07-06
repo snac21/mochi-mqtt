@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mochi-mqtt/server/v2/client"
 	"github.com/mochi-mqtt/server/v2/hooks/storage"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/mochi-mqtt/server/v2/system"
@@ -50,7 +51,7 @@ func (h *modifiedHookBase) Stop() error {
 	return nil
 }
 
-func (h *modifiedHookBase) OnConnect(cl *Client, pk packets.Packet) error {
+func (h *modifiedHookBase) OnConnect(cl client.Client, pk packets.Packet) error {
 	if h.fail {
 		return errTestHook
 	}
@@ -58,15 +59,15 @@ func (h *modifiedHookBase) OnConnect(cl *Client, pk packets.Packet) error {
 	return nil
 }
 
-func (h *modifiedHookBase) OnConnectAuthenticate(cl *Client, pk packets.Packet) bool {
+func (h *modifiedHookBase) OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool {
 	return true
 }
 
-func (h *modifiedHookBase) OnACLCheck(cl *Client, topic string, write bool) bool {
+func (h *modifiedHookBase) OnACLCheck(cl client.Client, topic string, write bool) bool {
 	return true
 }
 
-func (h *modifiedHookBase) OnPublish(cl *Client, pk packets.Packet) (packets.Packet, error) {
+func (h *modifiedHookBase) OnPublish(cl client.Client, pk packets.Packet) (packets.Packet, error) {
 	if h.fail {
 		if h.err != nil {
 			return pk, h.err
@@ -78,7 +79,7 @@ func (h *modifiedHookBase) OnPublish(cl *Client, pk packets.Packet) (packets.Pac
 	return pk, nil
 }
 
-func (h *modifiedHookBase) OnPacketRead(cl *Client, pk packets.Packet) (packets.Packet, error) {
+func (h *modifiedHookBase) OnPacketRead(cl client.Client, pk packets.Packet) (packets.Packet, error) {
 	if h.fail {
 		if h.err != nil {
 			return pk, h.err
@@ -90,7 +91,7 @@ func (h *modifiedHookBase) OnPacketRead(cl *Client, pk packets.Packet) (packets.
 	return pk, nil
 }
 
-func (h *modifiedHookBase) OnAuthPacket(cl *Client, pk packets.Packet) (packets.Packet, error) {
+func (h *modifiedHookBase) OnAuthPacket(cl client.Client, pk packets.Packet) (packets.Packet, error) {
 	if h.fail {
 		if h.err != nil {
 			return pk, h.err
@@ -102,7 +103,7 @@ func (h *modifiedHookBase) OnAuthPacket(cl *Client, pk packets.Packet) (packets.
 	return pk, nil
 }
 
-func (h *modifiedHookBase) OnWill(cl *Client, will Will) (Will, error) {
+func (h *modifiedHookBase) OnWill(cl client.Client, will client.Will) (client.Will, error) {
 	if h.fail {
 		return will, errTestHook
 	}
@@ -228,7 +229,7 @@ func TestHooksStop(t *testing.T) {
 // coverage: also cover some empty functions
 func TestHooksNonReturns(t *testing.T) {
 	h := new(Hooks)
-	cl := new(Client)
+	cl := new(client.BaseClient)
 
 	for i := 0; i < 2; i++ {
 		t.Run("step-"+strconv.Itoa(i), func(t *testing.T) {
@@ -265,26 +266,26 @@ func TestHooksNonReturns(t *testing.T) {
 func TestHooksOnConnectAuthenticate(t *testing.T) {
 	h := new(Hooks)
 
-	ok := h.OnConnectAuthenticate(new(Client), packets.Packet{})
+	ok := h.OnConnectAuthenticate(new(client.BaseClient), packets.Packet{})
 	require.False(t, ok)
 
 	err := h.Add(new(modifiedHookBase), nil)
 	require.NoError(t, err)
 
-	ok = h.OnConnectAuthenticate(new(Client), packets.Packet{})
+	ok = h.OnConnectAuthenticate(new(client.BaseClient), packets.Packet{})
 	require.True(t, ok)
 }
 
 func TestHooksOnACLCheck(t *testing.T) {
 	h := new(Hooks)
 
-	ok := h.OnACLCheck(new(Client), "a/b/c", true)
+	ok := h.OnACLCheck(new(client.BaseClient), "a/b/c", true)
 	require.False(t, ok)
 
 	err := h.Add(new(modifiedHookBase), nil)
 	require.NoError(t, err)
 
-	ok = h.OnACLCheck(new(Client), "a/b/c", true)
+	ok = h.OnACLCheck(new(client.BaseClient), "a/b/c", true)
 	require.True(t, ok)
 }
 
@@ -298,7 +299,7 @@ func TestHooksOnSubscribe(t *testing.T) {
 			{Filter: "a/b/c", Qos: 1},
 		},
 	}
-	pk := h.OnSubscribe(new(Client), pki)
+	pk := h.OnSubscribe(new(client.BaseClient), pki)
 	require.EqualValues(t, pk, pki)
 }
 
@@ -328,7 +329,7 @@ func TestHooksOnUnsubscribe(t *testing.T) {
 		},
 	}
 
-	pk := h.OnUnsubscribe(new(Client), pki)
+	pk := h.OnUnsubscribe(new(client.BaseClient), pki)
 	require.EqualValues(t, pk, pki)
 }
 
@@ -340,19 +341,19 @@ func TestHooksOnPublish(t *testing.T) {
 	err := h.Add(hook, nil)
 	require.NoError(t, err)
 
-	pk, err := h.OnPublish(new(Client), packets.Packet{PacketID: 10})
+	pk, err := h.OnPublish(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 
 	// coverage: failure
 	hook.fail = true
-	pk, err = h.OnPublish(new(Client), packets.Packet{PacketID: 10})
+	pk, err = h.OnPublish(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.Error(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 
 	// coverage: reject packet
 	hook.err = packets.ErrRejectPacket
-	pk, err = h.OnPublish(new(Client), packets.Packet{PacketID: 10})
+	pk, err = h.OnPublish(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.Error(t, err)
 	require.ErrorIs(t, err, packets.ErrRejectPacket)
 	require.Equal(t, uint16(10), pk.PacketID)
@@ -366,19 +367,19 @@ func TestHooksOnPacketRead(t *testing.T) {
 	err := h.Add(hook, nil)
 	require.NoError(t, err)
 
-	pk, err := h.OnPacketRead(new(Client), packets.Packet{PacketID: 10})
+	pk, err := h.OnPacketRead(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 
 	// coverage: failure
 	hook.fail = true
-	pk, err = h.OnPacketRead(new(Client), packets.Packet{PacketID: 10})
+	pk, err = h.OnPacketRead(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 
 	// coverage: reject packet
 	hook.err = packets.ErrRejectPacket
-	pk, err = h.OnPacketRead(new(Client), packets.Packet{PacketID: 10})
+	pk, err = h.OnPacketRead(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.Error(t, err)
 	require.ErrorIs(t, err, packets.ErrRejectPacket)
 	require.Equal(t, uint16(10), pk.PacketID)
@@ -392,12 +393,12 @@ func TestHooksOnAuthPacket(t *testing.T) {
 	err := h.Add(hook, nil)
 	require.NoError(t, err)
 
-	pk, err := h.OnAuthPacket(new(Client), packets.Packet{PacketID: 10})
+	pk, err := h.OnAuthPacket(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 
 	hook.fail = true
-	pk, err = h.OnAuthPacket(new(Client), packets.Packet{PacketID: 10})
+	pk, err = h.OnAuthPacket(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.Error(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 }
@@ -410,11 +411,11 @@ func TestHooksOnConnect(t *testing.T) {
 	err := h.Add(hook, nil)
 	require.NoError(t, err)
 
-	err = h.OnConnect(new(Client), packets.Packet{PacketID: 10})
+	err = h.OnConnect(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 
 	hook.fail = true
-	err = h.OnConnect(new(Client), packets.Packet{PacketID: 10})
+	err = h.OnConnect(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.Error(t, err)
 }
 
@@ -426,7 +427,7 @@ func TestHooksOnPacketEncode(t *testing.T) {
 	err := h.Add(hook, nil)
 	require.NoError(t, err)
 
-	pk := h.OnPacketEncode(new(Client), packets.Packet{PacketID: 10})
+	pk := h.OnPacketEncode(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.Equal(t, uint16(10), pk.PacketID)
 }
 
@@ -438,12 +439,12 @@ func TestHooksOnLWT(t *testing.T) {
 	err := h.Add(hook, nil)
 	require.NoError(t, err)
 
-	lwt := h.OnWill(new(Client), Will{TopicName: "a/b/c"})
+	lwt := h.OnWill(new(client.BaseClient), client.Will{TopicName: "a/b/c"})
 	require.Equal(t, "a/b/c", lwt.TopicName)
 
 	// coverage: fail lwt
 	hook.fail = true
-	lwt = h.OnWill(new(Client), Will{TopicName: "a/b/c"})
+	lwt = h.OnWill(new(client.BaseClient), client.Will{TopicName: "a/b/c"})
 	require.Equal(t, "a/b/c", lwt.TopicName)
 }
 
@@ -587,46 +588,46 @@ func TestHookBaseClose(t *testing.T) {
 
 func TestHookBaseOnConnectAuthenticate(t *testing.T) {
 	h := new(HookBase)
-	v := h.OnConnectAuthenticate(new(Client), packets.Packet{})
+	v := h.OnConnectAuthenticate(new(client.BaseClient), packets.Packet{})
 	require.False(t, v)
 }
 
 func TestHookBaseOnACLCheck(t *testing.T) {
 	h := new(HookBase)
-	v := h.OnACLCheck(new(Client), "topic", true)
+	v := h.OnACLCheck(new(client.BaseClient), "topic", true)
 	require.False(t, v)
 }
 
 func TestHookBaseOnConnect(t *testing.T) {
 	h := new(HookBase)
-	err := h.OnConnect(new(Client), packets.Packet{})
+	err := h.OnConnect(new(client.BaseClient), packets.Packet{})
 	require.NoError(t, err)
 }
 
 func TestHookBaseOnPublish(t *testing.T) {
 	h := new(HookBase)
-	pk, err := h.OnPublish(new(Client), packets.Packet{PacketID: 10})
+	pk, err := h.OnPublish(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 }
 
 func TestHookBaseOnPacketRead(t *testing.T) {
 	h := new(HookBase)
-	pk, err := h.OnPacketRead(new(Client), packets.Packet{PacketID: 10})
+	pk, err := h.OnPacketRead(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 }
 
 func TestHookBaseOnAuthPacket(t *testing.T) {
 	h := new(HookBase)
-	pk, err := h.OnAuthPacket(new(Client), packets.Packet{PacketID: 10})
+	pk, err := h.OnAuthPacket(new(client.BaseClient), packets.Packet{PacketID: 10})
 	require.NoError(t, err)
 	require.Equal(t, uint16(10), pk.PacketID)
 }
 
 func TestHookBaseOnLWT(t *testing.T) {
 	h := new(HookBase)
-	lwt, err := h.OnWill(new(Client), Will{TopicName: "a/b/c"})
+	lwt, err := h.OnWill(new(client.BaseClient), client.Will{TopicName: "a/b/c"})
 	require.NoError(t, err)
 	require.Equal(t, "a/b/c", lwt.TopicName)
 }

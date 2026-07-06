@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/mochi-mqtt/server/v2/client"
 	"github.com/mochi-mqtt/server/v2/hooks/storage"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/mochi-mqtt/server/v2/system"
@@ -79,35 +80,35 @@ type Hook interface {
 
 	OnStarted()
 	OnStopped()
-	OnConnectAuthenticate(cl *Client, pk packets.Packet) bool
-	OnACLCheck(cl *Client, topic string, write bool) bool
+	OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool
+	OnACLCheck(cl client.Client, topic string, write bool) bool
 	OnSysInfoTick(*system.Info)
-	OnConnect(cl *Client, pk packets.Packet) error
-	OnSessionEstablish(cl *Client, pk packets.Packet)
-	OnSessionEstablished(cl *Client, pk packets.Packet)
-	OnDisconnect(cl *Client, err error, expire bool)
-	OnAuthPacket(cl *Client, pk packets.Packet) (packets.Packet, error)
-	OnPacketRead(cl *Client, pk packets.Packet) (packets.Packet, error) // triggers when a new packet is received by a client, but before packet validation
-	OnPacketEncode(cl *Client, pk packets.Packet) packets.Packet        // modify a packet before it is byte-encoded and written to the client
-	OnPacketSent(cl *Client, pk packets.Packet, b []byte)               // triggers when packet bytes have been written to the client
-	OnPacketProcessed(cl *Client, pk packets.Packet, err error)         // triggers after a packet from the client been processed (handled)
-	OnSubscribe(cl *Client, pk packets.Packet) packets.Packet
-	OnSubscribed(cl *Client, pk packets.Packet, reasonCodes []byte)
+	OnConnect(cl client.Client, pk packets.Packet) error
+	OnSessionEstablish(cl client.Client, pk packets.Packet)
+	OnSessionEstablished(cl client.Client, pk packets.Packet)
+	OnDisconnect(cl client.Client, err error, expire bool)
+	OnAuthPacket(cl client.Client, pk packets.Packet) (packets.Packet, error)
+	OnPacketRead(cl client.Client, pk packets.Packet) (packets.Packet, error) // triggers when a new packet is received by a client, but before packet validation
+	OnPacketEncode(cl client.Client, pk packets.Packet) packets.Packet        // modify a packet before it is byte-encoded and written to the client
+	OnPacketSent(cl client.Client, pk packets.Packet, b []byte)               // triggers when packet bytes have been written to the client
+	OnPacketProcessed(cl client.Client, pk packets.Packet, err error)         // triggers after a packet from the client been processed (handled)
+	OnSubscribe(cl client.Client, pk packets.Packet) packets.Packet
+	OnSubscribed(cl client.Client, pk packets.Packet, reasonCodes []byte)
 	OnSelectSubscribers(subs *Subscribers, pk packets.Packet) *Subscribers
-	OnUnsubscribe(cl *Client, pk packets.Packet) packets.Packet
-	OnUnsubscribed(cl *Client, pk packets.Packet)
-	OnPublish(cl *Client, pk packets.Packet) (packets.Packet, error)
-	OnPublished(cl *Client, pk packets.Packet)
-	OnPublishDropped(cl *Client, pk packets.Packet)
-	OnRetainMessage(cl *Client, pk packets.Packet, r int64)
-	OnRetainPublished(cl *Client, pk packets.Packet)
-	OnQosPublish(cl *Client, pk packets.Packet, sent int64, resends int)
-	OnQosComplete(cl *Client, pk packets.Packet)
-	OnQosDropped(cl *Client, pk packets.Packet)
-	OnPacketIDExhausted(cl *Client, pk packets.Packet)
-	OnWill(cl *Client, will Will) (Will, error)
-	OnWillSent(cl *Client, pk packets.Packet)
-	OnClientExpired(cl *Client)
+	OnUnsubscribe(cl client.Client, pk packets.Packet) packets.Packet
+	OnUnsubscribed(cl client.Client, pk packets.Packet)
+	OnPublish(cl client.Client, pk packets.Packet) (packets.Packet, error)
+	OnPublished(cl client.Client, pk packets.Packet)
+	OnPublishDropped(cl client.Client, pk packets.Packet)
+	OnRetainMessage(cl client.Client, pk packets.Packet, r int64)
+	OnRetainPublished(cl client.Client, pk packets.Packet)
+	OnQosPublish(cl client.Client, pk packets.Packet, sent int64, resends int)
+	OnQosComplete(cl client.Client, pk packets.Packet)
+	OnQosDropped(cl client.Client, pk packets.Packet)
+	OnPacketIDExhausted(cl client.Client, pk packets.Packet)
+	OnWill(cl client.Client, will client.Will) (client.Will, error)
+	OnWillSent(cl client.Client, pk packets.Packet)
+	OnClientExpired(cl client.Client)
 	OnRetainedExpired(filter string)
 	StoredClients() ([]storage.Client, error)
 	StoredSubscriptions() ([]storage.Subscription, error)
@@ -226,7 +227,7 @@ func (h *Hooks) OnStopped() {
 }
 
 // OnConnect is called when a new client connects, and may return a packets.Code as an error to halt the connection.
-func (h *Hooks) OnConnect(cl *Client, pk packets.Packet) error {
+func (h *Hooks) OnConnect(cl client.Client, pk packets.Packet) error {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnConnect) {
 			err := hook.OnConnect(cl, pk)
@@ -240,7 +241,7 @@ func (h *Hooks) OnConnect(cl *Client, pk packets.Packet) error {
 
 // OnSessionEstablish is called right after a new client connects and authenticates and right before
 // the session is established and CONNACK is sent.
-func (h *Hooks) OnSessionEstablish(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnSessionEstablish(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnSessionEstablish) {
 			hook.OnSessionEstablish(cl, pk)
@@ -249,7 +250,7 @@ func (h *Hooks) OnSessionEstablish(cl *Client, pk packets.Packet) {
 }
 
 // OnSessionEstablished is called when a new client establishes a session (after OnConnect).
-func (h *Hooks) OnSessionEstablished(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnSessionEstablished(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnSessionEstablished) {
 			hook.OnSessionEstablished(cl, pk)
@@ -258,7 +259,7 @@ func (h *Hooks) OnSessionEstablished(cl *Client, pk packets.Packet) {
 }
 
 // OnDisconnect is called when a client is disconnected for any reason.
-func (h *Hooks) OnDisconnect(cl *Client, err error, expire bool) {
+func (h *Hooks) OnDisconnect(cl client.Client, err error, expire bool) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnDisconnect) {
 			hook.OnDisconnect(cl, err, expire)
@@ -267,7 +268,7 @@ func (h *Hooks) OnDisconnect(cl *Client, err error, expire bool) {
 }
 
 // OnPacketRead is called when a packet is received from a client.
-func (h *Hooks) OnPacketRead(cl *Client, pk packets.Packet) (pkx packets.Packet, err error) {
+func (h *Hooks) OnPacketRead(cl client.Client, pk packets.Packet) (pkx packets.Packet, err error) {
 	pkx = pk
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPacketRead) {
@@ -288,7 +289,7 @@ func (h *Hooks) OnPacketRead(cl *Client, pk packets.Packet) (pkx packets.Packet,
 
 // OnAuthPacket is called when an auth packet is received. It is intended to allow developers
 // to create their own auth packet handling mechanisms.
-func (h *Hooks) OnAuthPacket(cl *Client, pk packets.Packet) (pkx packets.Packet, err error) {
+func (h *Hooks) OnAuthPacket(cl client.Client, pk packets.Packet) (pkx packets.Packet, err error) {
 	pkx = pk
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnAuthPacket) {
@@ -305,7 +306,7 @@ func (h *Hooks) OnAuthPacket(cl *Client, pk packets.Packet) (pkx packets.Packet,
 }
 
 // OnPacketEncode is called immediately before a packet is encoded to be sent to a client.
-func (h *Hooks) OnPacketEncode(cl *Client, pk packets.Packet) packets.Packet {
+func (h *Hooks) OnPacketEncode(cl client.Client, pk packets.Packet) packets.Packet {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPacketEncode) {
 			pk = hook.OnPacketEncode(cl, pk)
@@ -316,7 +317,7 @@ func (h *Hooks) OnPacketEncode(cl *Client, pk packets.Packet) packets.Packet {
 }
 
 // OnPacketProcessed is called when a packet has been received and successfully handled by the broker.
-func (h *Hooks) OnPacketProcessed(cl *Client, pk packets.Packet, err error) {
+func (h *Hooks) OnPacketProcessed(cl client.Client, pk packets.Packet, err error) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPacketProcessed) {
 			hook.OnPacketProcessed(cl, pk, err)
@@ -326,7 +327,7 @@ func (h *Hooks) OnPacketProcessed(cl *Client, pk packets.Packet, err error) {
 
 // OnPacketSent is called when a packet has been sent to a client. It takes a bytes parameter
 // containing the bytes sent.
-func (h *Hooks) OnPacketSent(cl *Client, pk packets.Packet, b []byte) {
+func (h *Hooks) OnPacketSent(cl client.Client, pk packets.Packet, b []byte) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPacketSent) {
 			hook.OnPacketSent(cl, pk, b)
@@ -338,7 +339,7 @@ func (h *Hooks) OnPacketSent(cl *Client, pk packets.Packet, b []byte) {
 // differs from OnSubscribed in that it allows you to modify the subscription values
 // before the packet is processed. The return values of the hook methods are passed-through
 // in the order the hooks were attached.
-func (h *Hooks) OnSubscribe(cl *Client, pk packets.Packet) packets.Packet {
+func (h *Hooks) OnSubscribe(cl client.Client, pk packets.Packet) packets.Packet {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnSubscribe) {
 			pk = hook.OnSubscribe(cl, pk)
@@ -348,7 +349,7 @@ func (h *Hooks) OnSubscribe(cl *Client, pk packets.Packet) packets.Packet {
 }
 
 // OnSubscribed is called when a client subscribes to one or more filters.
-func (h *Hooks) OnSubscribed(cl *Client, pk packets.Packet, reasonCodes []byte) {
+func (h *Hooks) OnSubscribed(cl client.Client, pk packets.Packet, reasonCodes []byte) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnSubscribed) {
 			hook.OnSubscribed(cl, pk, reasonCodes)
@@ -373,7 +374,7 @@ func (h *Hooks) OnSelectSubscribers(subs *Subscribers, pk packets.Packet) *Subsc
 // differs from OnUnsubscribed in that it allows you to modify the unsubscription values
 // before the packet is processed. The return values of the hook methods are passed-through
 // in the order the hooks were attached.
-func (h *Hooks) OnUnsubscribe(cl *Client, pk packets.Packet) packets.Packet {
+func (h *Hooks) OnUnsubscribe(cl client.Client, pk packets.Packet) packets.Packet {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnUnsubscribe) {
 			pk = hook.OnUnsubscribe(cl, pk)
@@ -383,7 +384,7 @@ func (h *Hooks) OnUnsubscribe(cl *Client, pk packets.Packet) packets.Packet {
 }
 
 // OnUnsubscribed is called when a client unsubscribes from one or more filters.
-func (h *Hooks) OnUnsubscribed(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnUnsubscribed(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnUnsubscribed) {
 			hook.OnUnsubscribed(cl, pk)
@@ -394,7 +395,7 @@ func (h *Hooks) OnUnsubscribed(cl *Client, pk packets.Packet) {
 // OnPublish is called when a client publishes a message. This method differs from OnPublished
 // in that it allows you to modify you to modify the incoming packet before it is processed.
 // The return values of the hook methods are passed-through in the order the hooks were attached.
-func (h *Hooks) OnPublish(cl *Client, pk packets.Packet) (pkx packets.Packet, err error) {
+func (h *Hooks) OnPublish(cl client.Client, pk packets.Packet) (pkx packets.Packet, err error) {
 	pkx = pk
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPublish) {
@@ -423,7 +424,7 @@ func (h *Hooks) OnPublish(cl *Client, pk packets.Packet) (pkx packets.Packet, er
 }
 
 // OnPublished is called when a client has published a message to subscribers.
-func (h *Hooks) OnPublished(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnPublished(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPublished) {
 			hook.OnPublished(cl, pk)
@@ -433,7 +434,7 @@ func (h *Hooks) OnPublished(cl *Client, pk packets.Packet) {
 
 // OnPublishDropped is called when a message to a client was dropped instead of delivered
 // such as when a client is too slow to respond.
-func (h *Hooks) OnPublishDropped(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnPublishDropped(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPublishDropped) {
 			hook.OnPublishDropped(cl, pk)
@@ -442,7 +443,7 @@ func (h *Hooks) OnPublishDropped(cl *Client, pk packets.Packet) {
 }
 
 // OnRetainMessage is called then a published message is retained.
-func (h *Hooks) OnRetainMessage(cl *Client, pk packets.Packet, r int64) {
+func (h *Hooks) OnRetainMessage(cl client.Client, pk packets.Packet, r int64) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnRetainMessage) {
 			hook.OnRetainMessage(cl, pk, r)
@@ -451,7 +452,7 @@ func (h *Hooks) OnRetainMessage(cl *Client, pk packets.Packet, r int64) {
 }
 
 // OnRetainPublished is called when a retained message is published.
-func (h *Hooks) OnRetainPublished(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnRetainPublished(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnRetainPublished) {
 			hook.OnRetainPublished(cl, pk)
@@ -462,7 +463,7 @@ func (h *Hooks) OnRetainPublished(cl *Client, pk packets.Packet) {
 // OnQosPublish is called when a publish packet with Qos >= 1 is issued to a subscriber.
 // In other words, this method is called when a new inflight message is created or resent.
 // It is typically used to store a new inflight message.
-func (h *Hooks) OnQosPublish(cl *Client, pk packets.Packet, sent int64, resends int) {
+func (h *Hooks) OnQosPublish(cl client.Client, pk packets.Packet, sent int64, resends int) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnQosPublish) {
 			hook.OnQosPublish(cl, pk, sent, resends)
@@ -473,7 +474,7 @@ func (h *Hooks) OnQosPublish(cl *Client, pk packets.Packet, sent int64, resends 
 // OnQosComplete is called when the Qos flow for a message has been completed.
 // In other words, when an inflight message is resolved.
 // It is typically used to delete an inflight message from a store.
-func (h *Hooks) OnQosComplete(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnQosComplete(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnQosComplete) {
 			hook.OnQosComplete(cl, pk)
@@ -484,7 +485,7 @@ func (h *Hooks) OnQosComplete(cl *Client, pk packets.Packet) {
 // OnQosDropped is called the Qos flow for a message expires. In other words, when
 // an inflight message expires or is abandoned. It is typically used to delete an
 // inflight message from a store.
-func (h *Hooks) OnQosDropped(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnQosDropped(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnQosDropped) {
 			hook.OnQosDropped(cl, pk)
@@ -494,7 +495,7 @@ func (h *Hooks) OnQosDropped(cl *Client, pk packets.Packet) {
 
 // OnPacketIDExhausted is called when the client runs out of unused packet ids to
 // assign to a packet.
-func (h *Hooks) OnPacketIDExhausted(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnPacketIDExhausted(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnPacketIDExhausted) {
 			hook.OnPacketIDExhausted(cl, pk)
@@ -506,7 +507,7 @@ func (h *Hooks) OnPacketIDExhausted(cl *Client, pk packets.Packet) {
 // differs from OnWillSent in that it allows you to modify the LWT message before it is
 // published. The return values of the hook methods are passed-through in the order
 // the hooks were attached.
-func (h *Hooks) OnWill(cl *Client, will Will) Will {
+func (h *Hooks) OnWill(cl client.Client, will client.Will) client.Will {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnWill) {
 			mlwt, err := hook.OnWill(cl, will)
@@ -525,7 +526,7 @@ func (h *Hooks) OnWill(cl *Client, will Will) Will {
 }
 
 // OnWillSent is called when an LWT message has been issued from a disconnecting client.
-func (h *Hooks) OnWillSent(cl *Client, pk packets.Packet) {
+func (h *Hooks) OnWillSent(cl client.Client, pk packets.Packet) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnWillSent) {
 			hook.OnWillSent(cl, pk)
@@ -534,7 +535,7 @@ func (h *Hooks) OnWillSent(cl *Client, pk packets.Packet) {
 }
 
 // OnClientExpired is called when a client session has expired and should be deleted.
-func (h *Hooks) OnClientExpired(cl *Client) {
+func (h *Hooks) OnClientExpired(cl client.Client) {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnClientExpired) {
 			hook.OnClientExpired(cl)
@@ -654,7 +655,7 @@ func (h *Hooks) StoredSysInfo() (v storage.SystemInfo, err error) {
 // An implementation of this method MUST be used to allow or deny access to the
 // server (see hooks/auth/allow_all or basic). It can be used in custom hooks to
 // check connecting users against an existing user database.
-func (h *Hooks) OnConnectAuthenticate(cl *Client, pk packets.Packet) bool {
+func (h *Hooks) OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnConnectAuthenticate) {
 			if ok := hook.OnConnectAuthenticate(cl, pk); ok {
@@ -670,7 +671,7 @@ func (h *Hooks) OnConnectAuthenticate(cl *Client, pk packets.Packet) bool {
 // An implementation of this method MUST be used to allow or deny access to the
 // (see hooks/auth/allow_all or basic). It can be used in custom hooks to
 // check publishing and subscribing users against an existing permissions or roles database.
-func (h *Hooks) OnACLCheck(cl *Client, topic string, write bool) bool {
+func (h *Hooks) OnACLCheck(cl client.Client, topic string, write bool) bool {
 	for _, hook := range h.GetAll() {
 		if hook.Provides(OnACLCheck) {
 			if ok := hook.OnACLCheck(cl, topic, write); ok {
@@ -729,58 +730,58 @@ func (h *HookBase) OnStopped() {}
 func (h *HookBase) OnSysInfoTick(*system.Info) {}
 
 // OnConnectAuthenticate is called when a user attempts to authenticate with the server.
-func (h *HookBase) OnConnectAuthenticate(cl *Client, pk packets.Packet) bool {
+func (h *HookBase) OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool {
 	return false
 }
 
 // OnACLCheck is called when a user attempts to subscribe or publish to a topic.
-func (h *HookBase) OnACLCheck(cl *Client, topic string, write bool) bool {
+func (h *HookBase) OnACLCheck(cl client.Client, topic string, write bool) bool {
 	return false
 }
 
 // OnConnect is called when a new client connects.
-func (h *HookBase) OnConnect(cl *Client, pk packets.Packet) error {
+func (h *HookBase) OnConnect(cl client.Client, pk packets.Packet) error {
 	return nil
 }
 
 // OnSessionEstablish is called right after a new client connects and authenticates and right before
 // the session is established and CONNACK is sent.
-func (h *HookBase) OnSessionEstablish(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnSessionEstablish(cl client.Client, pk packets.Packet) {}
 
 // OnSessionEstablished is called when a new client establishes a session (after OnConnect).
-func (h *HookBase) OnSessionEstablished(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnSessionEstablished(cl client.Client, pk packets.Packet) {}
 
 // OnDisconnect is called when a client is disconnected for any reason.
-func (h *HookBase) OnDisconnect(cl *Client, err error, expire bool) {}
+func (h *HookBase) OnDisconnect(cl client.Client, err error, expire bool) {}
 
 // OnAuthPacket is called when an auth packet is received from the client.
-func (h *HookBase) OnAuthPacket(cl *Client, pk packets.Packet) (packets.Packet, error) {
+func (h *HookBase) OnAuthPacket(cl client.Client, pk packets.Packet) (packets.Packet, error) {
 	return pk, nil
 }
 
 // OnPacketRead is called when a packet is received.
-func (h *HookBase) OnPacketRead(cl *Client, pk packets.Packet) (packets.Packet, error) {
+func (h *HookBase) OnPacketRead(cl client.Client, pk packets.Packet) (packets.Packet, error) {
 	return pk, nil
 }
 
 // OnPacketEncode is called before a packet is byte-encoded and written to the client.
-func (h *HookBase) OnPacketEncode(cl *Client, pk packets.Packet) packets.Packet {
+func (h *HookBase) OnPacketEncode(cl client.Client, pk packets.Packet) packets.Packet {
 	return pk
 }
 
 // OnPacketSent is called immediately after a packet is written to a client.
-func (h *HookBase) OnPacketSent(cl *Client, pk packets.Packet, b []byte) {}
+func (h *HookBase) OnPacketSent(cl client.Client, pk packets.Packet, b []byte) {}
 
 // OnPacketProcessed is called immediately after a packet from a client is processed.
-func (h *HookBase) OnPacketProcessed(cl *Client, pk packets.Packet, err error) {}
+func (h *HookBase) OnPacketProcessed(cl client.Client, pk packets.Packet, err error) {}
 
 // OnSubscribe is called when a client subscribes to one or more filters.
-func (h *HookBase) OnSubscribe(cl *Client, pk packets.Packet) packets.Packet {
+func (h *HookBase) OnSubscribe(cl client.Client, pk packets.Packet) packets.Packet {
 	return pk
 }
 
 // OnSubscribed is called when a client subscribes to one or more filters.
-func (h *HookBase) OnSubscribed(cl *Client, pk packets.Packet, reasonCodes []byte) {}
+func (h *HookBase) OnSubscribed(cl client.Client, pk packets.Packet, reasonCodes []byte) {}
 
 // OnSelectSubscribers is called when selecting subscribers to receive a message.
 func (h *HookBase) OnSelectSubscribers(subs *Subscribers, pk packets.Packet) *Subscribers {
@@ -788,52 +789,52 @@ func (h *HookBase) OnSelectSubscribers(subs *Subscribers, pk packets.Packet) *Su
 }
 
 // OnUnsubscribe is called when a client unsubscribes from one or more filters.
-func (h *HookBase) OnUnsubscribe(cl *Client, pk packets.Packet) packets.Packet {
+func (h *HookBase) OnUnsubscribe(cl client.Client, pk packets.Packet) packets.Packet {
 	return pk
 }
 
 // OnUnsubscribed is called when a client unsubscribes from one or more filters.
-func (h *HookBase) OnUnsubscribed(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnUnsubscribed(cl client.Client, pk packets.Packet) {}
 
 // OnPublish is called when a client publishes a message.
-func (h *HookBase) OnPublish(cl *Client, pk packets.Packet) (packets.Packet, error) {
+func (h *HookBase) OnPublish(cl client.Client, pk packets.Packet) (packets.Packet, error) {
 	return pk, nil
 }
 
 // OnPublished is called when a client has published a message to subscribers.
-func (h *HookBase) OnPublished(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnPublished(cl client.Client, pk packets.Packet) {}
 
 // OnPublishDropped is called when a message to a client is dropped instead of being delivered.
-func (h *HookBase) OnPublishDropped(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnPublishDropped(cl client.Client, pk packets.Packet) {}
 
 // OnRetainMessage is called then a published message is retained.
-func (h *HookBase) OnRetainMessage(cl *Client, pk packets.Packet, r int64) {}
+func (h *HookBase) OnRetainMessage(cl client.Client, pk packets.Packet, r int64) {}
 
 // OnRetainPublished is called when a retained message is published.
-func (h *HookBase) OnRetainPublished(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnRetainPublished(cl client.Client, pk packets.Packet) {}
 
 // OnQosPublish is called when a publish packet with Qos > 1 is issued to a subscriber.
-func (h *HookBase) OnQosPublish(cl *Client, pk packets.Packet, sent int64, resends int) {}
+func (h *HookBase) OnQosPublish(cl client.Client, pk packets.Packet, sent int64, resends int) {}
 
 // OnQosComplete is called when the Qos flow for a message has been completed.
-func (h *HookBase) OnQosComplete(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnQosComplete(cl client.Client, pk packets.Packet) {}
 
 // OnQosDropped is called the Qos flow for a message expires.
-func (h *HookBase) OnQosDropped(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnQosDropped(cl client.Client, pk packets.Packet) {}
 
 // OnPacketIDExhausted is called when the client runs out of unused packet ids to assign to a packet.
-func (h *HookBase) OnPacketIDExhausted(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnPacketIDExhausted(cl client.Client, pk packets.Packet) {}
 
 // OnWill is called when a client disconnects and publishes an LWT message.
-func (h *HookBase) OnWill(cl *Client, will Will) (Will, error) {
+func (h *HookBase) OnWill(cl client.Client, will client.Will) (client.Will, error) {
 	return will, nil
 }
 
 // OnWillSent is called when an LWT message has been issued from a disconnecting client.
-func (h *HookBase) OnWillSent(cl *Client, pk packets.Packet) {}
+func (h *HookBase) OnWillSent(cl client.Client, pk packets.Packet) {}
 
 // OnClientExpired is called when a client session has expired.
-func (h *HookBase) OnClientExpired(cl *Client) {}
+func (h *HookBase) OnClientExpired(cl client.Client) {}
 
 // OnRetainedExpired is called when a retained message for a topic has expired.
 func (h *HookBase) OnRetainedExpired(topic string) {}

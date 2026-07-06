@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/mochi-mqtt/server/v2/client"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/stretchr/testify/require"
 )
@@ -815,19 +816,19 @@ func TestIsSharedFilter(t *testing.T) {
 }
 
 func TestNewInboundAliases(t *testing.T) {
-	a := NewInboundTopicAliases(5)
+	a := client.NewInboundTopicAliases(5)
 	require.NotNil(t, a)
-	require.NotNil(t, a.internal)
-	require.Equal(t, uint16(5), a.maximum)
+	require.NotNil(t, a.Internal)
+	require.Equal(t, uint16(5), a.Maximum)
 }
 
 func TestInboundAliasesSet(t *testing.T) {
 	topic := "test"
 	id := uint16(1)
-	a := NewInboundTopicAliases(5)
+	a := client.NewInboundTopicAliases(5)
 	require.Equal(t, topic, a.Set(id, topic))
-	require.Contains(t, a.internal, id)
-	require.Equal(t, a.internal[id], topic)
+	require.Contains(t, a.Internal, id)
+	require.Equal(t, a.Internal[id], topic)
 
 	require.Equal(t, topic, a.Set(id, ""))
 }
@@ -835,21 +836,21 @@ func TestInboundAliasesSet(t *testing.T) {
 func TestInboundAliasesSetMaxZero(t *testing.T) {
 	topic := "test"
 	id := uint16(1)
-	a := NewInboundTopicAliases(0)
+	a := client.NewInboundTopicAliases(0)
 	require.Equal(t, topic, a.Set(id, topic))
-	require.NotContains(t, a.internal, id)
+	require.NotContains(t, a.Internal, id)
 }
 
 func TestNewOutboundAliases(t *testing.T) {
-	a := NewOutboundTopicAliases(5)
+	a := client.NewOutboundTopicAliases(5)
 	require.NotNil(t, a)
-	require.NotNil(t, a.internal)
-	require.Equal(t, uint16(5), a.maximum)
-	require.Equal(t, uint32(0), a.cursor)
+	require.NotNil(t, a.Internal)
+	require.Equal(t, uint16(5), a.Maximum)
+	require.Equal(t, uint32(0), a.Cursor)
 }
 
 func TestOutboundAliasesSet(t *testing.T) {
-	a := NewOutboundTopicAliases(3)
+	a := client.NewOutboundTopicAliases(3)
 	n, ok := a.Set("t1")
 	require.False(t, ok)
 	require.Equal(t, uint16(1), n)
@@ -873,18 +874,18 @@ func TestOutboundAliasesSet(t *testing.T) {
 
 func TestOutboundAliasesSetMaxZero(t *testing.T) {
 	topic := "test"
-	a := NewOutboundTopicAliases(0)
+	a := client.NewOutboundTopicAliases(0)
 	n, ok := a.Set(topic)
 	require.False(t, ok)
 	require.Equal(t, uint16(0), n)
 }
 
 func TestNewTopicAliases(t *testing.T) {
-	a := NewTopicAliases(5)
+	a := client.NewTopicAliases(5)
 	require.NotNil(t, a.Inbound)
-	require.Equal(t, uint16(5), a.Inbound.maximum)
+	require.Equal(t, uint16(5), a.Inbound.Maximum)
 	require.NotNil(t, a.Outbound)
-	require.Equal(t, uint16(5), a.Outbound.maximum)
+	require.Equal(t, uint16(5), a.Outbound.Maximum)
 }
 
 func TestNewInlineSubscriptions(t *testing.T) {
@@ -896,7 +897,7 @@ func TestNewInlineSubscriptions(t *testing.T) {
 
 func TestInlineSubscriptionAdd(t *testing.T) {
 	subscriptions := NewInlineSubscriptions()
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		// handler logic
 	}
 
@@ -914,7 +915,7 @@ func TestInlineSubscriptionAdd(t *testing.T) {
 
 func TestInlineSubscriptionGet(t *testing.T) {
 	subscriptions := NewInlineSubscriptions()
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		// handler logic
 	}
 
@@ -958,7 +959,7 @@ func TestInlineSubscriptionsGetAll(t *testing.T) {
 
 func TestInlineSubscriptionDelete(t *testing.T) {
 	subscriptions := NewInlineSubscriptions()
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		// handler logic
 	}
 
@@ -977,7 +978,7 @@ func TestInlineSubscriptionDelete(t *testing.T) {
 
 func TestInlineSubscribe(t *testing.T) {
 
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		// handler logic
 	}
 
@@ -1037,7 +1038,7 @@ func TestInlineSubscribe(t *testing.T) {
 }
 
 func TestInlineUnsubscribe(t *testing.T) {
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		// handler logic
 	}
 

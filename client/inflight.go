@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2023 mochi-mqtt, mochi-co
 // SPDX-FileContributor: mochi-co
 
-package mqtt
+package client
 
 import (
 	"sort"
@@ -226,6 +226,14 @@ func (i *Inflight) ResetSendQuota(n int32) {
 // SendQuota returns the remaining send quota.
 func (i *Inflight) SendQuota() int32 {
 	return i.sendQuotaState.current()
+}
+
+func (i *Inflight) SetSendQuota(val int32) {
+	i.sendQuotaState.set(val, i.MaximumSendQuota())
+}
+
+func (i *Inflight) SetReceiveQuota(val int32) {
+	i.receiveQuotaState.set(val, i.MaximumReceiveQuota())
 }
 
 // MaximumSendQuota returns the maximum send quota.

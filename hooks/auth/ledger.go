@@ -5,13 +5,13 @@
 package auth
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"encoding/json"
 	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
@@ -135,11 +135,11 @@ func (l *Ledger) Update(ln *Ledger) {
 }
 
 // AuthOk returns true if the rules indicate the user is allowed to authenticate.
-func (l *Ledger) AuthOk(cl *mqtt.Client, pk packets.Packet) (n int, ok bool) {
+func (l *Ledger) AuthOk(cl clt.Client, pk packets.Packet) (n int, ok bool) {
 	// If the users map is set, always check for a predefined user first instead
 	// of iterating through global rules.
 	if l.Users != nil {
-		if u, ok := l.Users[string(cl.Properties.Username)]; ok &&
+		if u, ok := l.Users[string(cl.GetProperties().Username)]; ok &&
 			u.Password != "" &&
 			u.Password == RString(pk.Connect.Password) {
 			return 0, !u.Disallow
@@ -149,10 +149,10 @@ func (l *Ledger) AuthOk(cl *mqtt.Client, pk packets.Packet) (n int, ok bool) {
 	// If there's no users map, or no user was found, attempt to find a matching
 	// rule (which may also contain a user).
 	for n, rule := range l.Auth {
-		if rule.Client.Matches(cl.ID) &&
-			rule.Username.Matches(string(cl.Properties.Username)) &&
+		if rule.Client.Matches(cl.GetID()) &&
+			rule.Username.Matches(string(cl.GetProperties().Username)) &&
 			rule.Password.Matches(string(pk.Connect.Password)) &&
-			rule.Remote.Matches(cl.Net.Remote) {
+			rule.Remote.Matches(cl.GetConnection().Remote) {
 			return n, rule.Allow
 		}
 	}
@@ -162,11 +162,11 @@ func (l *Ledger) AuthOk(cl *mqtt.Client, pk packets.Packet) (n int, ok bool) {
 
 // ACLOk returns true if the rules indicate the user is allowed to read or write to
 // a specific filter or topic respectively, based on the `write` bool.
-func (l *Ledger) ACLOk(cl *mqtt.Client, topic string, write bool) (n int, ok bool) {
+func (l *Ledger) ACLOk(cl clt.Client, topic string, write bool) (n int, ok bool) {
 	// If the users map is set, always check for a predefined user first instead
 	// of iterating through global rules.
 	if l.Users != nil {
-		if u, ok := l.Users[string(cl.Properties.Username)]; ok && len(u.ACL) > 0 {
+		if u, ok := l.Users[string(cl.GetProperties().Username)]; ok && len(u.ACL) > 0 {
 			for filter, access := range u.ACL {
 				if filter.FilterMatches(topic) {
 					if !write && (access == ReadOnly || access == ReadWrite) {
@@ -182,9 +182,9 @@ func (l *Ledger) ACLOk(cl *mqtt.Client, topic string, write bool) (n int, ok boo
 	}
 
 	for n, rule := range l.ACL {
-		if rule.Client.Matches(cl.ID) &&
-			rule.Username.Matches(string(cl.Properties.Username)) &&
-			rule.Remote.Matches(cl.Net.Remote) {
+		if rule.Client.Matches(cl.GetID()) &&
+			rule.Username.Matches(string(cl.GetProperties().Username)) &&
+			rule.Remote.Matches(cl.GetConnection().Remote) {
 			if len(rule.Filters) == 0 {
 				return n, true
 			}

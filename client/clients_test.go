@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2022 mochi-mqtt, mochi-co
 // SPDX-FileContributor: mochi-co
 
-package mqtt
+package client
 
 import (
 	"bufio"
@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/mochi-mqtt/server/v2/packets"
-	"github.com/mochi-mqtt/server/v2/system"
 	"github.com/mochi-mqtt/server/v2/transport"
 
 	"github.com/stretchr/testify/require"
@@ -30,23 +29,46 @@ const pkInfo = "packet type %v, %s"
 
 var errClientStop = errors.New("test stop")
 
-func newTestClient() (cl *Client, r net.Conn, w net.Conn) {
+type mockCallbacks struct {
+	BytesReceived    int64
+	PacketsReceived  int64
+	MessagesReceived int64
+	BytesSent        int64
+	PacketsSent      int64
+	MessagesSent     int64
+	Inflight         int64
+}
+
+func (m *mockCallbacks) OnPacketRead(cl Client, pk packets.Packet) (packets.Packet, error) {
+	return pk, nil
+}
+func (m *mockCallbacks) OnPacketEncode(cl Client, pk packets.Packet) packets.Packet {
+	return pk
+}
+func (m *mockCallbacks) OnPacketSent(cl Client, pk packets.Packet, b []byte) {}
+func (m *mockCallbacks) OnQosDropped(cl Client, pk packets.Packet)           {}
+func (m *mockCallbacks) OnQosComplete(cl Client, pk packets.Packet)          {}
+func (m *mockCallbacks) AddBytesReceived(n int64)                            { atomic.AddInt64(&m.BytesReceived, n) }
+func (m *mockCallbacks) AddPacketsReceived(n int64)                          { atomic.AddInt64(&m.PacketsReceived, n) }
+func (m *mockCallbacks) AddMessagesReceived(n int64)                         { atomic.AddInt64(&m.MessagesReceived, n) }
+func (m *mockCallbacks) AddBytesSent(n int64)                                { atomic.AddInt64(&m.BytesSent, n) }
+func (m *mockCallbacks) AddPacketsSent(n int64)                              { atomic.AddInt64(&m.PacketsSent, n) }
+func (m *mockCallbacks) AddMessagesSent(n int64)                             { atomic.AddInt64(&m.MessagesSent, n) }
+func (m *mockCallbacks) AddInflight(n int64)                                 { atomic.AddInt64(&m.Inflight, n) }
+
+func newTestClient() (cl *BaseClient, r net.Conn, w net.Conn) {
 	r, w = net.Pipe()
 
-	cl = newTcpClient(w, &ops{
-		info:  new(system.Info),
-		hooks: new(Hooks),
-		log:   logger,
-		options: &Options{
-			Capabilities: &Capabilities{
-				ReceiveMaximum:             10,
-				MaximumInflight:            5,
-				TopicAliasMaximum:          10000,
-				MaximumClientWritesPending: 3,
-				maximumPacketID:            10,
-			},
-		},
-	})
+	cl = NewTCPClient(w, &Ops{
+		TopicAliasMaximum:          10000,
+		MaximumClientWritesPending: 3,
+		ClientNetReadBufferSize:    4096,
+		ClientNetWriteBufferSize:   4096,
+		MaximumPacketID:            10,
+		MaximumInflight:            5,
+		Callbacks:                  &mockCallbacks{},
+		Log:                        slog.Default(),
+	}).(*BaseClient)
 
 	cl.ID = "mochi"
 	cl.State.Inflight.ResetSendQuota(5)
@@ -75,27 +97,27 @@ func TestNewClients(t *testing.T) {
 
 func TestClientsAdd(t *testing.T) {
 	cl := NewClients()
-	cl.Add(&Client{ID: "t1"})
+	cl.Add(&BaseClient{ID: "t1"})
 	require.Contains(t, cl.internal, "t1")
 }
 
 func TestClientsGet(t *testing.T) {
 	cl := NewClients()
-	cl.Add(&Client{ID: "t1"})
-	cl.Add(&Client{ID: "t2"})
+	cl.Add(&BaseClient{ID: "t1"})
+	cl.Add(&BaseClient{ID: "t2"})
 	require.Contains(t, cl.internal, "t1")
 	require.Contains(t, cl.internal, "t2")
 
 	client, ok := cl.Get("t1")
 	require.Equal(t, true, ok)
-	require.Equal(t, "t1", client.ID)
+	require.Equal(t, "t1", client.GetID())
 }
 
 func TestClientsGetAll(t *testing.T) {
 	cl := NewClients()
-	cl.Add(&Client{ID: "t1"})
-	cl.Add(&Client{ID: "t2"})
-	cl.Add(&Client{ID: "t3"})
+	cl.Add(&BaseClient{ID: "t1"})
+	cl.Add(&BaseClient{ID: "t2"})
+	cl.Add(&BaseClient{ID: "t3"})
 	require.Contains(t, cl.internal, "t1")
 	require.Contains(t, cl.internal, "t2")
 	require.Contains(t, cl.internal, "t3")
@@ -106,8 +128,8 @@ func TestClientsGetAll(t *testing.T) {
 
 func TestClientsLen(t *testing.T) {
 	cl := NewClients()
-	cl.Add(&Client{ID: "t1"})
-	cl.Add(&Client{ID: "t2"})
+	cl.Add(&BaseClient{ID: "t1"})
+	cl.Add(&BaseClient{ID: "t2"})
 	require.Contains(t, cl.internal, "t1")
 	require.Contains(t, cl.internal, "t2")
 	require.Equal(t, 2, cl.Len())
@@ -116,7 +138,7 @@ func TestClientsLen(t *testing.T) {
 
 func TestClientsDelete(t *testing.T) {
 	cl := NewClients()
-	cl.Add(&Client{ID: "t1"})
+	cl.Add(&BaseClient{ID: "t1"})
 	require.Contains(t, cl.internal, "t1")
 
 	cl.Delete("t1")
@@ -127,15 +149,15 @@ func TestClientsDelete(t *testing.T) {
 
 func TestClientsGetByListener(t *testing.T) {
 	cl := NewClients()
-	cl.Add(&Client{ID: "t1", State: ClientState{open: context.Background()}, Net: ClientConnection{Listener: "tcp1"}})
-	cl.Add(&Client{ID: "t2", State: ClientState{open: context.Background()}, Net: ClientConnection{Listener: "ws1"}})
+	cl.Add(&BaseClient{ID: "t1", State: ClientState{Open: context.Background()}, Net: ClientConnection{Listener: "tcp1"}})
+	cl.Add(&BaseClient{ID: "t2", State: ClientState{Open: context.Background()}, Net: ClientConnection{Listener: "ws1"}})
 	require.Contains(t, cl.internal, "t1")
 	require.Contains(t, cl.internal, "t2")
 
 	clients := cl.GetByListener("tcp1")
 	require.NotEmpty(t, clients)
 	require.Equal(t, 1, len(clients))
-	require.Equal(t, "tcp1", clients[0].Net.Listener)
+	require.Equal(t, "tcp1", clients[0].GetConnection().Listener)
 }
 
 func TestNewClient(t *testing.T) {
@@ -151,8 +173,7 @@ func TestNewClient(t *testing.T) {
 	tcpTr, ok := cl.Net.Transport.(*transport.TCPTransport)
 	require.True(t, ok)
 	require.NotNil(t, tcpTr.Bconn)
-	require.NotNil(t, cl.ops)
-	require.NotNil(t, cl.ops.options.Capabilities)
+	require.NotNil(t, cl.Ops)
 	require.False(t, cl.Net.Inline)
 }
 
@@ -187,8 +208,8 @@ func TestClientParseConnect(t *testing.T) {
 	require.Equal(t, pk.Connect.WillQos, cl.Properties.Will.Qos)
 	require.Equal(t, pk.Connect.WillRetain, cl.Properties.Will.Retain)
 	require.Equal(t, uint32(1), cl.Properties.Will.Flag)
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.ReceiveQuota())
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.MaximumReceiveQuota())
+	require.Equal(t, int32(cl.Ops.MaximumPacketSize), cl.State.Inflight.ReceiveQuota())
+	require.Equal(t, int32(cl.Ops.MaximumPacketSize), cl.State.Inflight.MaximumReceiveQuota())
 	require.Equal(t, int32(pk.Properties.ReceiveMaximum), cl.State.Inflight.SendQuota())
 	require.Equal(t, int32(pk.Properties.ReceiveMaximum), cl.State.Inflight.MaximumSendQuota())
 }
@@ -196,7 +217,7 @@ func TestClientParseConnect(t *testing.T) {
 func TestClientParseConnectReceiveMaxExceedMaxInflight(t *testing.T) {
 	const MaxInflight uint16 = 1
 	cl, _, _ := newTestClient()
-	cl.ops.options.Capabilities.MaximumInflight = MaxInflight
+	cl.Ops.MaximumInflight = MaxInflight
 
 	pk := packets.Packet{
 		ProtocolVersion: 4,
@@ -226,8 +247,8 @@ func TestClientParseConnectReceiveMaxExceedMaxInflight(t *testing.T) {
 	require.Equal(t, pk.Connect.WillQos, cl.Properties.Will.Qos)
 	require.Equal(t, pk.Connect.WillRetain, cl.Properties.Will.Retain)
 	require.Equal(t, uint32(1), cl.Properties.Will.Flag)
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.ReceiveQuota())
-	require.Equal(t, int32(cl.ops.options.Capabilities.ReceiveMaximum), cl.State.Inflight.MaximumReceiveQuota())
+	require.Equal(t, int32(cl.Ops.MaximumPacketSize), cl.State.Inflight.ReceiveQuota())
+	require.Equal(t, int32(cl.Ops.MaximumPacketSize), cl.State.Inflight.MaximumReceiveQuota())
 	require.Equal(t, int32(MaxInflight), cl.State.Inflight.SendQuota())
 	require.Equal(t, int32(MaxInflight), cl.State.Inflight.MaximumSendQuota())
 }
@@ -267,7 +288,7 @@ func TestClientParseConnectBelowMinimumKeepalive(t *testing.T) {
 	cl, _, _ := newTestClient()
 	var b bytes.Buffer
 	x := bufio.NewWriter(&b)
-	cl.ops.log = slog.New(slog.NewTextHandler(x, nil))
+	cl.Ops.Log = slog.New(slog.NewTextHandler(x, nil))
 
 	pk := packets.Packet{
 		ProtocolVersion: 4,
@@ -312,7 +333,7 @@ func TestClientNextPacketIDInUse(t *testing.T) {
 
 	// Skip over overflow
 	cl.State.Inflight.Set(packets.Packet{PacketID: 65535})
-	atomic.StoreUint32(&cl.State.packetID, 65534)
+	atomic.StoreUint32(&cl.State.PacketID, 65534)
 
 	i, err = cl.NextPacketID()
 	require.NoError(t, err)
@@ -321,7 +342,7 @@ func TestClientNextPacketIDInUse(t *testing.T) {
 
 func TestClientNextPacketIDExhausted(t *testing.T) {
 	cl, _, _ := newTestClient()
-	for i := uint32(1); i <= cl.ops.options.Capabilities.maximumPacketID; i++ {
+	for i := uint32(1); i <= cl.Ops.MaximumPacketID; i++ {
 		cl.State.Inflight.internal[uint16(i)] = packets.Packet{PacketID: uint16(i)}
 	}
 
@@ -333,17 +354,17 @@ func TestClientNextPacketIDExhausted(t *testing.T) {
 
 func TestClientNextPacketIDOverflow(t *testing.T) {
 	cl, _, _ := newTestClient()
-	for i := uint32(0); i < cl.ops.options.Capabilities.maximumPacketID; i++ {
+	for i := uint32(0); i < cl.Ops.MaximumPacketID; i++ {
 		cl.State.Inflight.internal[uint16(i)] = packets.Packet{}
 	}
 
-	cl.State.packetID = cl.ops.options.Capabilities.maximumPacketID - 1
+	cl.State.PacketID = cl.Ops.MaximumPacketID - 1
 	i, err := cl.NextPacketID()
 	require.NoError(t, err)
-	require.Equal(t, cl.ops.options.Capabilities.maximumPacketID, i)
-	cl.State.Inflight.internal[uint16(cl.ops.options.Capabilities.maximumPacketID)] = packets.Packet{}
+	require.Equal(t, cl.Ops.MaximumPacketID, i)
+	cl.State.Inflight.internal[uint16(cl.Ops.MaximumPacketID)] = packets.Packet{}
 
-	cl.State.packetID = cl.ops.options.Capabilities.maximumPacketID
+	cl.State.PacketID = cl.Ops.MaximumPacketID
 	_, err = cl.NextPacketID()
 	require.Error(t, err)
 	require.ErrorIs(t, err, packets.ErrQuotaExceeded)
@@ -444,7 +465,7 @@ func TestClientResendInflightMessagesNoMessages(t *testing.T) {
 
 func TestClientRefreshDeadline(t *testing.T) {
 	cl, _, _ := newTestClient()
-	cl.refreshDeadline(10)
+	cl.RefreshDeadline(10)
 	require.NotNil(t, cl.Net.Transport.UnderlyingConn()) // how do we check net.Conn deadline?
 }
 
@@ -460,7 +481,7 @@ func TestClientReadFixedHeader(t *testing.T) {
 	fh := new(packets.FixedHeader)
 	err := cl.ReadFixedHeader(fh)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), atomic.LoadInt64(&cl.ops.info.BytesReceived))
+	require.Equal(t, int64(2), atomic.LoadInt64(&cl.Ops.Callbacks.(*mockCallbacks).BytesReceived))
 }
 
 func TestClientReadFixedHeaderDecodeError(t *testing.T) {
@@ -479,7 +500,7 @@ func TestClientReadFixedHeaderDecodeError(t *testing.T) {
 
 func TestClientReadFixedHeaderPacketOversized(t *testing.T) {
 	cl, r, _ := newTestClient()
-	cl.ops.options.Capabilities.MaximumPacketSize = 2
+	cl.Ops.MaximumPacketSize = 2
 	defer cl.Stop(errClientStop)
 
 	go func() {
@@ -541,7 +562,7 @@ func TestClientReadOK(t *testing.T) {
 	var pks []packets.Packet
 	o := make(chan error)
 	go func() {
-		o <- cl.Read(func(cl *Client, pk packets.Packet) error {
+		o <- cl.Read(func(cl Client, pk packets.Packet) error {
 			pks = append(pks, pk)
 			return nil
 		})
@@ -572,17 +593,17 @@ func TestClientReadOK(t *testing.T) {
 		},
 	}, pks)
 
-	require.Equal(t, int64(2), atomic.LoadInt64(&cl.ops.info.MessagesReceived))
+	require.Equal(t, int64(2), atomic.LoadInt64(&cl.Ops.Callbacks.(*mockCallbacks).MessagesReceived))
 }
 
 func TestClientReadDone(t *testing.T) {
 	cl, _, _ := newTestClient()
 	defer cl.Stop(errClientStop)
-	cl.State.cancelOpen()
+	cl.State.CancelOpen()
 
 	o := make(chan error)
 	go func() {
-		o <- cl.Read(func(cl *Client, pk packets.Packet) error {
+		o <- cl.Read(func(cl Client, pk packets.Packet) error {
 			return nil
 		})
 	}()
@@ -595,8 +616,8 @@ func TestClientStop(t *testing.T) {
 	require.Equal(t, int64(0), cl.StopTime())
 	cl.Stop(nil)
 	require.Equal(t, nil, cl.State.stopCause.Load())
-	require.InDelta(t, time.Now().Unix(), cl.State.disconnected, 1.0)
-	require.Equal(t, cl.State.disconnected, cl.StopTime())
+	require.InDelta(t, time.Now().Unix(), cl.State.Disconnected, 1.0)
+	require.Equal(t, cl.State.Disconnected, cl.StopTime())
 	require.True(t, cl.Closed())
 	require.Equal(t, nil, cl.StopCause())
 }
@@ -611,7 +632,7 @@ func TestClientClosed(t *testing.T) {
 func TestClientIsTakenOver(t *testing.T) {
 	cl, _, _ := newTestClient()
 	require.False(t, cl.IsTakenOver())
-	cl.State.isTakenOver.Store(true)
+	cl.State.IsTakenOver.Store(true)
 	require.True(t, cl.IsTakenOver())
 }
 
@@ -645,7 +666,7 @@ func TestClientReadReadHandlerErr(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	err := cl.Read(func(cl *Client, pk packets.Packet) error {
+	err := cl.Read(func(cl Client, pk packets.Packet) error {
 		return errors.New("test")
 	})
 
@@ -685,13 +706,13 @@ func TestClientReadReadPacketOK(t *testing.T) {
 }
 
 func TestClientReadPacket(t *testing.T) {
-	cl, r, _ := newTestClient()
-	defer cl.Stop(errClientStop)
-
 	for _, tx := range pkTable {
 		tt := tx // avoid data race
 		t.Run(tt.Desc, func(t *testing.T) {
-			atomic.StoreInt64(&cl.ops.info.PacketsReceived, 0)
+			cl, r, _ := newTestClient()
+			defer cl.Stop(errClientStop)
+
+			atomic.StoreInt64(&cl.Ops.Callbacks.(*mockCallbacks).PacketsReceived, 0)
 			go func() {
 				_, _ = r.Write(tt.RawBytes)
 			}()
@@ -712,7 +733,7 @@ func TestClientReadPacket(t *testing.T) {
 			require.Equal(t, *tt.Packet, pk, pkInfo, tt.Case, tt.Desc)
 
 			if tt.Packet.FixedHeader.Type == packets.Publish {
-				require.Equal(t, int64(1), atomic.LoadInt64(&cl.ops.info.PacketsReceived), pkInfo, tt.Case, tt.Desc)
+				require.Equal(t, int64(1), atomic.LoadInt64(&cl.Ops.Callbacks.(*mockCallbacks).PacketsReceived), pkInfo, tt.Case, tt.Desc)
 			}
 		})
 	}
@@ -759,10 +780,10 @@ func TestClientWritePacket(t *testing.T) {
 				errors.Is(err, io.EOF) ||
 				errors.Is(err, io.ErrClosedPipe))
 
-		require.Equal(t, int64(len(tt.RawBytes)), atomic.LoadInt64(&cl.ops.info.BytesSent))
-		require.Equal(t, int64(1), atomic.LoadInt64(&cl.ops.info.PacketsSent))
+		require.Equal(t, int64(len(tt.RawBytes)), atomic.LoadInt64(&cl.Ops.Callbacks.(*mockCallbacks).BytesSent))
+		require.Equal(t, int64(1), atomic.LoadInt64(&cl.Ops.Callbacks.(*mockCallbacks).PacketsSent))
 		if tt.Packet.FixedHeader.Type == packets.Publish {
-			require.Equal(t, int64(1), atomic.LoadInt64(&cl.ops.info.MessagesSent))
+			require.Equal(t, int64(1), atomic.LoadInt64(&cl.Ops.Callbacks.(*mockCallbacks).MessagesSent))
 		}
 	}
 }
@@ -770,32 +791,30 @@ func TestClientWritePacket(t *testing.T) {
 func TestClientWritePacketBuffer(t *testing.T) {
 	r, w := net.Pipe()
 
-	cl := newTcpClient(w, &ops{
-		info:  new(system.Info),
-		hooks: new(Hooks),
-		log:   logger,
-		options: &Options{
-			Capabilities: &Capabilities{
-				ReceiveMaximum:             10,
-				TopicAliasMaximum:          10000,
-				MaximumClientWritesPending: 3,
-				maximumPacketID:            10,
-			},
-		},
-	})
+	cl := NewTCPClient(w, &Ops{
+		TopicAliasMaximum:          10000,
+		MaximumClientWritesPending: 3,
+		ClientNetReadBufferSize:    4096,
+		ClientNetWriteBufferSize:   10,
+		MaximumPacketSize:          10,
+		MaximumPacketID:            10,
+		MaximumInflight:            10,
+		Callbacks:                  &mockCallbacks{},
+		Log:                        slog.Default(),
+	}).(*BaseClient)
 
 	cl.ID = "mochi"
 	setTestInflightQuotas(cl.State.Inflight, 5, 10)
 	cl.Properties.Props.TopicAliasMaximum = 0
 	cl.Properties.Props.RequestResponseInfo = 0x1
 
-	cl.ops.options.ClientNetWriteBufferSize = 10
+	cl.Ops.ClientNetWriteBufferSize = 10
 	defer cl.Stop(errClientStop)
 
 	small := packets.TPacketData[packets.Publish].Get(packets.TPublishNoPayload).Packet
 	large := packets.TPacketData[packets.Publish].Get(packets.TPublishBasic).Packet
 
-	cl.State.outbound <- small
+	cl.State.Outbound <- small
 
 	tt := []struct {
 		pks  []*packets.Packet
@@ -898,7 +917,7 @@ func TestClientWritePacketWriteNoConn(t *testing.T) {
 
 	err := cl.WritePacket(*pkTable[1].Packet)
 	require.Error(t, err)
-	require.Equal(t, ErrConnectionClosed, err)
+	require.Equal(t, transport.ErrConnectionClosed, err)
 }
 
 func TestClientWritePacketWriteError(t *testing.T) {
@@ -948,9 +967,9 @@ func TestClientsGetByListenerConcurrentWithWrite(t *testing.T) {
 	cl := NewClients()
 
 	for i := 0; i < 25; i++ {
-		cl.Add(&Client{
+		cl.Add(&BaseClient{
 			ID:    "seed-" + strconv.Itoa(i),
-			State: ClientState{open: context.Background()},
+			State: ClientState{Open: context.Background()},
 			Net: ClientConnection{
 				Listener: "listener1",
 			},
@@ -979,9 +998,9 @@ func TestClientsGetByListenerConcurrentWithWrite(t *testing.T) {
 			<-start
 			for j := 0; j < 200; j++ {
 				clientID := "writer-" + strconv.Itoa(id) + "-" + strconv.Itoa(j)
-				cl.Add(&Client{
+				cl.Add(&BaseClient{
 					ID:    clientID,
-					State: ClientState{open: context.Background()},
+					State: ClientState{Open: context.Background()},
 					Net: ClientConnection{
 						Listener: "listener2",
 					},
@@ -1019,9 +1038,9 @@ func TestClientsGetByListenerRaceCondition(t *testing.T) {
 
 		go func(id int) {
 			defer wg.Done()
-			cl.Add(&Client{
+			cl.Add(&BaseClient{
 				ID:    string(rune('a' + id)),
-				State: ClientState{open: context.Background()},
+				State: ClientState{Open: context.Background()},
 				Net: ClientConnection{
 					Listener: "test",
 				},

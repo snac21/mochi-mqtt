@@ -8,6 +8,7 @@ package mqtt
 import (
 	"errors"
 	"fmt"
+	"github.com/mochi-mqtt/server/v2/client"
 	"math"
 	"net"
 	"os"
@@ -136,14 +137,14 @@ type Options struct {
 type Server struct {
 	Options      *Options             // configurable server options
 	Listeners    *listeners.Listeners // listeners are network interfaces which listen for new connections
-	Clients      *Clients             // clients known to the broker
+	Clients      *client.Clients      // clients known to the broker
 	Topics       *TopicsIndex         // an index of topic filter subscriptions and retained messages
 	Info         *system.Info         // values about the server commonly known as $SYS topics
 	loop         *loop                // loop contains tickers for the system event loop
 	done         chan bool            // indicate that the server is ending
 	Log          *slog.Logger         // minimal no-alloc logger
 	hooks        *Hooks               // hooks contains hooks for extra functionality such as auth and persistent storage
-	inlineClient *Client              // inlineClient is a special client used for inline subscriptions and inline Publish
+	inlineClient client.Client        // inlineClient is a special client used for inline subscriptions and inline Publish
 }
 
 // loop contains interval tickers for the system events loop.
@@ -175,7 +176,7 @@ func New(opts *Options) *Server {
 
 	s := &Server{
 		done:      make(chan bool),
-		Clients:   NewClients(),
+		Clients:   client.NewClients(),
 		Topics:    NewTopicsIndex(),
 		Listeners: listeners.New(),
 		loop: &loop{
@@ -239,22 +240,26 @@ func (o *Options) ensureDefaults() {
 // references to be used with the server. If you are using this client to directly publish
 // messages from the embedding application, set the inline flag to true to bypass ACL and
 // topic validation checks.
-func (s *Server) NewClient(c net.Conn, listener string, id string, inline bool) *Client {
-	cl := newClient(c, &ops{ // [MQTT-3.1.2-6] implicit
-		options: s.Options,
-		info:    s.Info,
-		hooks:   s.hooks,
-		log:     s.Log,
+func (s *Server) NewClient(c net.Conn, listener string, id string, inline bool) client.Client {
+	cl := client.NewTCPClient(c, &client.Ops{
+		TopicAliasMaximum:          s.Options.Capabilities.TopicAliasMaximum,
+		MaximumClientWritesPending: s.Options.Capabilities.MaximumClientWritesPending,
+		ClientNetReadBufferSize:    s.Options.ClientNetReadBufferSize,
+		ClientNetWriteBufferSize:   s.Options.ClientNetWriteBufferSize,
+		MaximumPacketSize:          s.Options.Capabilities.MaximumPacketSize,
+		MaximumPacketID:            s.Options.Capabilities.maximumPacketID,
+		MaximumInflight:            s.Options.Capabilities.MaximumInflight,
+		Callbacks:                  &clientCallbacks{s: s},
+		Log:                        s.Log,
 	})
 
-	cl.ID = id
-	cl.Net.Listener = listener
+	baseCl := cl.(*client.BaseClient)
+	baseCl.ID = id
+	baseCl.Net.Listener = listener
 
 	if inline { // inline clients bypass acl and some validity checks.
-		cl.Net.Inline = true
-		// By default, we don't want to restrict developer publishes,
-		// but if you do, reset this after creating inline client.
-		cl.State.Inflight.ResetReceiveQuota(math.MaxInt32)
+		baseCl.Net.Inline = true
+		baseCl.State.Inflight.ResetReceiveQuota(math.MaxInt32)
 	}
 
 	return cl
@@ -404,7 +409,8 @@ func (s *Server) EstablishConnection(listener string, c net.Conn) error {
 
 // attachClient validates an incoming client connection and if viable, attaches the client
 // to the server, performs session housekeeping, and reads incoming packets.
-func (s *Server) attachClient(cl *Client, listener string) error {
+func (s *Server) attachClient(clInterface client.Client, listener string) error {
+	cl := clInterface.(*client.BaseClient)
 	defer s.Listeners.ClientsWg.Done()
 	s.Listeners.ClientsWg.Add(1)
 
@@ -440,7 +446,7 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 		return err
 	}
 
-	cl.refreshDeadline(cl.State.Keepalive)
+	cl.RefreshDeadline(cl.State.Keepalive)
 	if !s.hooks.OnConnectAuthenticate(cl, pk) { // [MQTT-3.1.4-2]
 		err := s.SendConnack(cl, packets.ErrBadUsernameOrPassword, false, nil)
 		if err != nil {
@@ -479,7 +485,7 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 		s.sendLWT(cl)
 		cl.Stop(err)
 	} else {
-		cl.Properties.Will = Will{} // [MQTT-3.14.4-3] [MQTT-3.1.2-10]
+		cl.Properties.Will = client.Will{} // [MQTT-3.14.4-3] [MQTT-3.1.2-10]
 	}
 	s.Log.Debug("client disconnected", "error", err, "client", cl.ID, "remote", cl.Net.Remote, "listener", listener)
 
@@ -497,7 +503,8 @@ func (s *Server) attachClient(cl *Client, listener string) error {
 
 // readConnectionPacket reads the first incoming header for a connection, and if
 // acceptable, returns the valid connection packet.
-func (s *Server) readConnectionPacket(cl *Client) (pk packets.Packet, err error) {
+func (s *Server) readConnectionPacket(clInterface client.Client) (pk packets.Packet, err error) {
+	cl := clInterface.(*client.BaseClient)
 	fh := new(packets.FixedHeader)
 	err = cl.ReadFixedHeader(fh)
 	if err != nil {
@@ -518,7 +525,8 @@ func (s *Server) readConnectionPacket(cl *Client) (pk packets.Packet, err error)
 
 // receivePacket processes an incoming packet for a client, and issues a disconnect to the client
 // if an error has occurred (if mqtt v5).
-func (s *Server) receivePacket(cl *Client, pk packets.Packet) error {
+func (s *Server) receivePacket(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	err := s.processPacket(cl, pk)
 	if err != nil {
 		if code, ok := err.(packets.Code); ok &&
@@ -536,7 +544,8 @@ func (s *Server) receivePacket(cl *Client, pk packets.Packet) error {
 }
 
 // validateConnect validates that a connect packet is compliant.
-func (s *Server) validateConnect(cl *Client, pk packets.Packet) packets.Code {
+func (s *Server) validateConnect(clInterface client.Client, pk packets.Packet) packets.Code {
+	cl := clInterface.(*client.BaseClient)
 	code := pk.ConnectValidate() // [MQTT-3.1.4-1] [MQTT-3.1.4-2]
 	if code != packets.CodeSuccess {
 		return code
@@ -560,12 +569,14 @@ func (s *Server) validateConnect(cl *Client, pk packets.Packet) packets.Code {
 // inheritClientSession inherits the state of an existing client sharing the same
 // connection ID. If clean is true, the state of any previously existing client
 // session is abandoned.
-func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
-	if existing, ok := s.Clients.Get(cl.ID); ok {
-		existing.State.isTakenOver.Store(true)                                                          // must precede DisconnectClient to prevent Read goroutine from deleting new client [#483]
+func (s *Server) inheritClientSession(pk packets.Packet, clInterface client.Client) bool {
+	cl := clInterface.(*client.BaseClient)
+	if existingInterface, ok := s.Clients.Get(cl.ID); ok {
+		existing := existingInterface.(*client.BaseClient)
+		existing.State.IsTakenOver.Store(true)                                                          // must precede DisconnectClient to prevent Read goroutine from deleting new client [#483]
 		_ = s.DisconnectClient(existing, packets.ErrSessionTakenOver)                                   // [MQTT-3.1.4-3]
 		if pk.Connect.Clean || (existing.Properties.Clean && existing.Properties.ProtocolVersion < 5) { // [MQTT-3.1.2-4] [MQTT-3.1.4-4]
-			// UnsubscribeClient returns early when isTakenOver is true, so inline the full unsubscribe.
+			// UnsubscribeClient returns early when IsTakenOver is true, so inline the full unsubscribe.
 			i := 0
 			filterMap := existing.State.Subscriptions.GetAll()
 			filters := make([]packets.Subscription, len(filterMap))
@@ -586,8 +597,8 @@ func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 
 		if existing.State.Inflight.Len() > 0 {
 			cl.State.Inflight = existing.State.Inflight.Clone() // [MQTT-3.1.2-5]
-			if cl.State.Inflight.MaximumReceiveQuota() == 0 && cl.ops.options.Capabilities.ReceiveMaximum != 0 {
-				cl.State.Inflight.ResetReceiveQuota(int32(cl.ops.options.Capabilities.ReceiveMaximum)) // server receive max per client
+			if cl.State.Inflight.MaximumReceiveQuota() == 0 && s.Options.Capabilities.ReceiveMaximum != 0 {
+				cl.State.Inflight.ResetReceiveQuota(int32(s.Options.Capabilities.ReceiveMaximum)) // server receive max per client
 				cl.State.Inflight.ResetSendQuota(int32(cl.Properties.Props.ReceiveMaximum))            // client receive max
 			}
 		}
@@ -618,7 +629,8 @@ func (s *Server) inheritClientSession(pk packets.Packet, cl *Client) bool {
 }
 
 // SendConnack returns a Connack packet to a client.
-func (s *Server) SendConnack(cl *Client, reason packets.Code, present bool, properties *packets.Properties) error {
+func (s *Server) SendConnack(clInterface client.Client, reason packets.Code, present bool, properties *packets.Properties) error {
+	cl := clInterface.(*client.BaseClient)
 	if properties == nil {
 		properties = &packets.Properties{
 			ReceiveMaximum: s.Options.Capabilities.ReceiveMaximum,
@@ -683,7 +695,8 @@ func (s *Server) SendConnack(cl *Client, reason packets.Code, present bool, prop
 
 // processPacket processes an inbound packet for a client. Since the method is
 // typically called as a goroutine, errors are primarily for test checking purposes.
-func (s *Server) processPacket(cl *Client, pk packets.Packet) error {
+func (s *Server) processPacket(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	var err error
 
 	switch pk.FixedHeader.Type {
@@ -750,13 +763,15 @@ func (s *Server) processPacket(cl *Client, pk packets.Packet) error {
 
 // processConnect processes a Connect packet. The packet cannot be used to establish
 // a new connection on an existing connection. See EstablishConnection instead.
-func (s *Server) processConnect(cl *Client, _ packets.Packet) error {
+func (s *Server) processConnect(clInterface client.Client, _ packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	s.sendLWT(cl)
 	return packets.ErrProtocolViolationSecondConnect // [MQTT-3.1.0-2]
 }
 
 // processPingreq processes a Pingreq packet.
-func (s *Server) processPingreq(cl *Client, _ packets.Packet) error {
+func (s *Server) processPingreq(clInterface client.Client, _ packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	return cl.WritePacket(packets.Packet{
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Pingresp, // [MQTT-3.12.4-1]
@@ -806,7 +821,7 @@ func (s *Server) Subscribe(filter string, subscriptionId int, handler InlineSubF
 	}
 
 	pk := s.hooks.OnSubscribe(s.inlineClient, packets.Packet{ // subscribe like a normal client.
-		Origin:      s.inlineClient.ID,
+		Origin:      s.inlineClient.GetID(),
 		FixedHeader: packets.FixedHeader{Type: packets.Subscribe},
 		Filters:     packets.Subscriptions{subscription},
 	})
@@ -839,7 +854,7 @@ func (s *Server) Unsubscribe(filter string, subscriptionId int) error {
 	}
 
 	pk := s.hooks.OnUnsubscribe(s.inlineClient, packets.Packet{
-		Origin:      s.inlineClient.ID,
+		Origin:      s.inlineClient.GetID(),
 		FixedHeader: packets.FixedHeader{Type: packets.Unsubscribe},
 		Filters: packets.Subscriptions{
 			{
@@ -856,7 +871,8 @@ func (s *Server) Unsubscribe(filter string, subscriptionId int) error {
 
 // InjectPacket injects a packet into the broker as if it were sent from the specified client.
 // InlineClients using this method can publish packets to any topic (including $SYS) and bypass ACL checks.
-func (s *Server) InjectPacket(cl *Client, pk packets.Packet) error {
+func (s *Server) InjectPacket(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	pk.ProtocolVersion = cl.Properties.ProtocolVersion
 
 	err := s.processPacket(cl, pk)
@@ -864,16 +880,17 @@ func (s *Server) InjectPacket(cl *Client, pk packets.Packet) error {
 		return err
 	}
 
-	atomic.AddInt64(&cl.ops.info.PacketsReceived, 1)
+	atomic.AddInt64(&s.Info.PacketsReceived, 1)
 	if pk.FixedHeader.Type == packets.Publish {
-		atomic.AddInt64(&cl.ops.info.MessagesReceived, 1)
+		atomic.AddInt64(&s.Info.MessagesReceived, 1)
 	}
 
 	return nil
 }
 
 // processPublish processes a Publish packet.
-func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
+func (s *Server) processPublish(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	if !cl.Net.Inline && !IsValidFilter(pk.TopicName, true) {
 		return nil
 	}
@@ -1015,7 +1032,8 @@ func (s *Server) processPublish(cl *Client, pk packets.Packet) error {
 
 // retainMessage adds a message to a topic, and if a persistent store is provided,
 // adds the message to the store to be reloaded if necessary.
-func (s *Server) retainMessage(cl *Client, pk packets.Packet) {
+func (s *Server) retainMessage(clInterface client.Client, pk packets.Packet) {
+	cl := clInterface.(*client.BaseClient)
 	if s.Options.Capabilities.RetainAvailable == 0 || pk.Ignore {
 		return
 	}
@@ -1057,7 +1075,8 @@ func (s *Server) publishToSubscribers(pk packets.Packet) {
 	}
 
 	for id, subs := range subscribers.Subscriptions {
-		if cl, ok := s.Clients.Get(id); ok {
+		if clInterface, ok := s.Clients.Get(id); ok {
+			cl := clInterface.(*client.BaseClient)
 			_, err := s.publishToClient(cl, subs, pk)
 			if err != nil {
 				s.Log.Debug("failed publishing packet", "error", err, "client", cl.ID, "packet", pk)
@@ -1066,7 +1085,8 @@ func (s *Server) publishToSubscribers(pk packets.Packet) {
 	}
 }
 
-func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packets.Packet) (packets.Packet, error) {
+func (s *Server) publishToClient(clInterface client.Client, sub packets.Subscription, pk packets.Packet) (packets.Packet, error) {
+	cl := clInterface.(*client.BaseClient)
 	if sub.NoLocal && pk.Origin == cl.ID {
 		return pk, nil // [MQTT-3.8.3-3]
 	}
@@ -1141,11 +1161,11 @@ func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packet
 	}
 
 	select {
-	case cl.State.outbound <- &out:
-		atomic.AddInt32(&cl.State.outboundQty, 1)
+	case cl.State.Outbound <- &out:
+		atomic.AddInt32(&cl.State.OutboundQty, 1)
 	default:
 		atomic.AddInt64(&s.Info.MessagesDropped, 1)
-		cl.ops.hooks.OnPublishDropped(cl, pk)
+		s.hooks.OnPublishDropped(cl, pk)
 		if out.FixedHeader.Qos > 0 {
 			cl.State.Inflight.Delete(out.PacketID) // packet was dropped due to irregular circumstances, so rollback inflight.
 			cl.State.Inflight.IncreaseSendQuota()
@@ -1156,7 +1176,8 @@ func (s *Server) publishToClient(cl *Client, sub packets.Subscription, pk packet
 	return out, nil
 }
 
-func (s *Server) publishRetainedToClient(cl *Client, sub packets.Subscription, existed bool) {
+func (s *Server) publishRetainedToClient(clInterface client.Client, sub packets.Subscription, existed bool) {
+	cl := clInterface.(*client.BaseClient)
 	if IsSharedFilter(sub.Filter) {
 		return // 4.8.2 Non-normative - Shared Subscriptions - No Retained Messages are sent to the Session when it first subscribes.
 	}
@@ -1201,7 +1222,8 @@ func (s *Server) buildAck(packetID uint16, pkt, qos byte, properties packets.Pro
 }
 
 // processPuback processes a Puback packet, denoting completion of a QOS 1 packet sent from the server.
-func (s *Server) processPuback(cl *Client, pk packets.Packet) error {
+func (s *Server) processPuback(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	if _, ok := cl.State.Inflight.Get(pk.PacketID); !ok {
 		return nil // omit, but would be packets.ErrPacketIdentifierNotFound
 	}
@@ -1216,7 +1238,8 @@ func (s *Server) processPuback(cl *Client, pk packets.Packet) error {
 }
 
 // processPubrec processes a Pubrec packet, denoting receipt of a QOS 2 packet sent from the server.
-func (s *Server) processPubrec(cl *Client, pk packets.Packet) error {
+func (s *Server) processPubrec(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	if _, ok := cl.State.Inflight.Get(pk.PacketID); !ok { // [MQTT-4.3.3-7] [MQTT-4.3.3-13]
 		return cl.WritePacket(s.buildAck(pk.PacketID, packets.Pubrel, 1, pk.Properties, packets.ErrPacketIdentifierNotFound))
 	}
@@ -1225,7 +1248,7 @@ func (s *Server) processPubrec(cl *Client, pk packets.Packet) error {
 		if ok := cl.State.Inflight.Delete(pk.PacketID); ok {
 			atomic.AddInt64(&s.Info.Inflight, -1)
 		}
-		cl.ops.hooks.OnQosDropped(cl, pk)
+		s.hooks.OnQosDropped(cl, pk)
 		return nil // as per MQTT5 Section 4.13.2 paragraph 2
 	}
 
@@ -1236,7 +1259,8 @@ func (s *Server) processPubrec(cl *Client, pk packets.Packet) error {
 }
 
 // processPubrel processes a Pubrel packet, denoting completion of a QOS 2 packet sent from the client.
-func (s *Server) processPubrel(cl *Client, pk packets.Packet) error {
+func (s *Server) processPubrel(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	if _, ok := cl.State.Inflight.Get(pk.PacketID); !ok { // [MQTT-4.3.3-7] [MQTT-4.3.3-13]
 		return cl.WritePacket(s.buildAck(pk.PacketID, packets.Pubcomp, 0, pk.Properties, packets.ErrPacketIdentifierNotFound))
 	}
@@ -1245,7 +1269,7 @@ func (s *Server) processPubrel(cl *Client, pk packets.Packet) error {
 		if ok := cl.State.Inflight.Delete(pk.PacketID); ok {
 			atomic.AddInt64(&s.Info.Inflight, -1)
 		}
-		cl.ops.hooks.OnQosDropped(cl, pk)
+		s.hooks.OnQosDropped(cl, pk)
 		return nil
 	}
 
@@ -1268,7 +1292,8 @@ func (s *Server) processPubrel(cl *Client, pk packets.Packet) error {
 }
 
 // processPubcomp processes a Pubcomp packet, denoting completion of a QOS 2 packet sent from the server.
-func (s *Server) processPubcomp(cl *Client, pk packets.Packet) error {
+func (s *Server) processPubcomp(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	// regardless of whether the pubcomp is a success or failure, we end the qos flow, delete inflight, and restore the quotas.
 	cl.State.Inflight.IncreaseReceiveQuota() // +1 RECV QUOTA
 	cl.State.Inflight.IncreaseSendQuota()    // +1 SENT QUOTA
@@ -1281,7 +1306,8 @@ func (s *Server) processPubcomp(cl *Client, pk packets.Packet) error {
 }
 
 // processSubscribe processes a Subscribe packet.
-func (s *Server) processSubscribe(cl *Client, pk packets.Packet) error {
+func (s *Server) processSubscribe(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	pk = s.hooks.OnSubscribe(cl, pk)
 	code := packets.CodeSuccess
 	if _, ok := cl.State.Inflight.Get(pk.PacketID); ok {
@@ -1356,7 +1382,8 @@ func (s *Server) processSubscribe(cl *Client, pk packets.Packet) error {
 }
 
 // processUnsubscribe processes an unsubscribe packet.
-func (s *Server) processUnsubscribe(cl *Client, pk packets.Packet) error {
+func (s *Server) processUnsubscribe(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	code := packets.CodeSuccess
 	if _, ok := cl.State.Inflight.Get(pk.PacketID); ok {
 		code = packets.ErrPacketIdentifierInUse
@@ -1400,7 +1427,8 @@ func (s *Server) processUnsubscribe(cl *Client, pk packets.Packet) error {
 }
 
 // UnsubscribeClient unsubscribes a client from all of their subscriptions.
-func (s *Server) UnsubscribeClient(cl *Client) {
+func (s *Server) UnsubscribeClient(clInterface client.Client) {
+	cl := clInterface.(*client.BaseClient)
 	i := 0
 	filterMap := cl.State.Subscriptions.GetAll()
 	filters := make([]packets.Subscription, len(filterMap))
@@ -1423,7 +1451,8 @@ func (s *Server) UnsubscribeClient(cl *Client) {
 }
 
 // processAuth processes an Auth packet.
-func (s *Server) processAuth(cl *Client, pk packets.Packet) error {
+func (s *Server) processAuth(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	_, err := s.hooks.OnAuthPacket(cl, pk)
 	if err != nil {
 		return err
@@ -1433,7 +1462,8 @@ func (s *Server) processAuth(cl *Client, pk packets.Packet) error {
 }
 
 // processDisconnect processes a Disconnect packet.
-func (s *Server) processDisconnect(cl *Client, pk packets.Packet) error {
+func (s *Server) processDisconnect(clInterface client.Client, pk packets.Packet) error {
+	cl := clInterface.(*client.BaseClient)
 	if pk.Properties.SessionExpiryIntervalFlag {
 		if pk.Properties.SessionExpiryInterval > 0 && cl.Properties.Props.SessionExpiryInterval == 0 {
 			return packets.ErrProtocolViolationZeroNonZeroExpiry
@@ -1448,14 +1478,15 @@ func (s *Server) processDisconnect(cl *Client, pk packets.Packet) error {
 	}
 
 	s.loop.willDelayed.Delete(cl.ID) // [MQTT-3.1.3-9] [MQTT-3.1.2-8]
-	cl.Properties.Will = Will{}      // Clear LWT to prevent execution (Delete Will from server's records) [MQTT-3.14.4-3]
+	cl.Properties.Will = client.Will{}      // Clear LWT to prevent execution (Delete Will from server's records) [MQTT-3.14.4-3]
 	cl.Stop(packets.CodeDisconnect)  // [MQTT-3.14.4-2]
 
 	return nil
 }
 
 // DisconnectClient sends a Disconnect packet to a client and then closes the client connection.
-func (s *Server) DisconnectClient(cl *Client, code packets.Code) error {
+func (s *Server) DisconnectClient(clInterface client.Client, code packets.Code) error {
+	cl := clInterface.(*client.BaseClient)
 	out := packets.Packet{
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Disconnect,
@@ -1557,7 +1588,8 @@ func (s *Server) closeListenerClients(listener string) {
 }
 
 // sendLWT issues an LWT message to a topic when a client disconnects.
-func (s *Server) sendLWT(cl *Client) {
+func (s *Server) sendLWT(clInterface client.Client) {
+	cl := clInterface.(*client.BaseClient)
 	if atomic.LoadUint32(&cl.Properties.Will.Flag) == 0 {
 		return
 	}
@@ -1677,7 +1709,8 @@ func (s *Server) loadSubscriptions(v []storage.Subscription) {
 			Identifier:        sub.Identifier,
 		}
 		if s.Topics.Subscribe(sub.Client, sb) {
-			if cl, ok := s.Clients.Get(sub.Client); ok {
+			if clInterface, ok := s.Clients.Get(sub.Client); ok {
+				cl := clInterface.(*client.BaseClient)
 				cl.State.Subscriptions.Add(sub.Filter, sb)
 			}
 		}
@@ -1687,7 +1720,8 @@ func (s *Server) loadSubscriptions(v []storage.Subscription) {
 // loadClients restores clients from the datastore.
 func (s *Server) loadClients(v []storage.Client) {
 	for _, c := range v {
-		cl := s.NewClient(nil, c.Listener, c.ID, false)
+		clInterface := s.NewClient(nil, c.Listener, c.ID, false)
+		cl := clInterface.(*client.BaseClient)
 		cl.Properties.Username = c.Username
 		cl.Properties.Clean = c.Clean
 		cl.Properties.ProtocolVersion = c.ProtocolVersion
@@ -1704,7 +1738,15 @@ func (s *Server) loadClients(v []storage.Client) {
 			User:                      c.Properties.User,
 			MaximumPacketSize:         c.Properties.MaximumPacketSize,
 		}
-		cl.Properties.Will = Will(c.Will)
+		cl.Properties.Will = client.Will{
+			TopicName:         c.Will.TopicName,
+			Payload:           c.Will.Payload,
+			Qos:               c.Will.Qos,
+			Retain:            c.Will.Retain,
+			WillDelayInterval: c.Will.WillDelayInterval,
+			User:              c.Will.User,
+		}
+		cl.Properties.Will.Flag = c.Will.Flag
 
 		// cancel the context, update cl.State such as disconnected time and stopCause.
 		cl.Stop(packets.ErrServerShuttingDown)
@@ -1723,7 +1765,8 @@ func (s *Server) loadClients(v []storage.Client) {
 // loadInflight restores inflight messages from the datastore.
 func (s *Server) loadInflight(v []storage.Message) {
 	for _, msg := range v {
-		if client, ok := s.Clients.Get(msg.Client); ok {
+		if clientInterface, ok := s.Clients.Get(msg.Client); ok {
+			client := clientInterface.(*client.BaseClient)
 			client.State.Inflight.Set(msg.ToPacket())
 		}
 	}
@@ -1739,7 +1782,8 @@ func (s *Server) loadRetained(v []storage.Message) {
 // clearExpiredClients deletes all clients which have been disconnected for longer
 // than their given expiry intervals.
 func (s *Server) clearExpiredClients(dt int64) {
-	for id, client := range s.Clients.GetAll() {
+	for id, clientInterface := range s.Clients.GetAll() {
+		client := clientInterface.(*client.BaseClient)
 		disconnected := client.StopTime()
 		if disconnected == 0 {
 			continue
@@ -1757,26 +1801,17 @@ func (s *Server) clearExpiredClients(dt int64) {
 	}
 }
 
-// clearExpiredRetainedMessage deletes retained messages from topics if they have expired.
+// clearExpiredRetainedMessages deletes retained messages from topics if they have expired.
 func (s *Server) clearExpiredRetainedMessages(now int64) {
-	for filter, pk := range s.Topics.Retained.GetAll() {
-		expired := pk.ProtocolVersion == 5 && pk.Expiry > 0 && pk.Expiry < now // [MQTT-3.3.2-5]
-
-		// If the maximum message expiry interval is set (greater than 0), and the message
-		// retention period exceeds the maximum expiry, the message will be forcibly removed.
-		enforced := s.Options.Capabilities.MaximumMessageExpiryInterval > 0 &&
-			now-pk.Created > s.Options.Capabilities.MaximumMessageExpiryInterval
-
-		if expired || enforced {
-			s.Topics.Retained.Delete(filter)
-			s.hooks.OnRetainedExpired(filter)
-		}
-	}
+	s.Topics.ClearExpiredRetainedMessages(now, s.Options.Capabilities.MaximumMessageExpiryInterval, func(filter string) {
+		s.hooks.OnRetainedExpired(filter)
+	})
 }
 
 // clearExpiredInflights deletes any inflight messages which have expired.
 func (s *Server) clearExpiredInflights(now int64) {
-	for _, client := range s.Clients.GetAll() {
+	for _, clientInterface := range s.Clients.GetAll() {
+		client := clientInterface.(*client.BaseClient)
 		if deleted := client.ClearExpiredInflights(now, s.Options.Capabilities.MaximumMessageExpiryInterval); len(deleted) > 0 {
 			for _, id := range deleted {
 				s.hooks.OnQosDropped(client, packets.Packet{PacketID: id})
@@ -1790,11 +1825,12 @@ func (s *Server) sendDelayedLWT(dt int64) {
 	for id, pk := range s.loop.willDelayed.GetAll() {
 		if dt > pk.Expiry {
 			s.publishToSubscribers(pk) // [MQTT-3.1.2-8]
-			if cl, ok := s.Clients.Get(id); ok {
+			if clInterface, ok := s.Clients.Get(id); ok {
+				cl := clInterface.(*client.BaseClient)
 				if pk.FixedHeader.Retain {
 					s.retainMessage(cl, pk)
 				}
-				cl.Properties.Will = Will{} // [MQTT-3.1.2-10]
+				cl.Properties.Will = client.Will{} // [MQTT-3.1.2-10]
 				s.hooks.OnWillSent(cl, pk)
 			}
 			s.loop.willDelayed.Delete(id)
@@ -1822,4 +1858,56 @@ func minimum(a, b int64) (m int64) {
 		m = b
 	}
 	return
+}
+
+type clientCallbacks struct {
+	s *Server
+}
+
+func (cb *clientCallbacks) OnPacketRead(cl client.Client, pk packets.Packet) (packets.Packet, error) {
+	return cb.s.hooks.OnPacketRead(cl, pk)
+}
+
+func (cb *clientCallbacks) OnPacketEncode(cl client.Client, pk packets.Packet) packets.Packet {
+	return cb.s.hooks.OnPacketEncode(cl, pk)
+}
+
+func (cb *clientCallbacks) OnPacketSent(cl client.Client, pk packets.Packet, b []byte) {
+	cb.s.hooks.OnPacketSent(cl, pk, b)
+}
+
+func (cb *clientCallbacks) AddBytesReceived(n int64) {
+	atomic.AddInt64(&cb.s.Info.BytesReceived, n)
+}
+
+func (cb *clientCallbacks) AddPacketsReceived(n int64) {
+	atomic.AddInt64(&cb.s.Info.PacketsReceived, n)
+}
+
+func (cb *clientCallbacks) AddMessagesReceived(n int64) {
+	atomic.AddInt64(&cb.s.Info.MessagesReceived, n)
+}
+
+func (cb *clientCallbacks) AddBytesSent(n int64) {
+	atomic.AddInt64(&cb.s.Info.BytesSent, n)
+}
+
+func (cb *clientCallbacks) AddPacketsSent(n int64) {
+	atomic.AddInt64(&cb.s.Info.PacketsSent, n)
+}
+
+func (cb *clientCallbacks) AddMessagesSent(n int64) {
+	atomic.AddInt64(&cb.s.Info.MessagesSent, n)
+}
+
+func (cb *clientCallbacks) OnQosDropped(cl client.Client, pk packets.Packet) {
+	cb.s.hooks.OnQosDropped(cl, pk)
+}
+
+func (cb *clientCallbacks) OnQosComplete(cl client.Client, pk packets.Packet) {
+	cb.s.hooks.OnQosComplete(cl, pk)
+}
+
+func (cb *clientCallbacks) AddInflight(n int64) {
+	atomic.AddInt64(&cb.s.Info.Inflight, n)
 }

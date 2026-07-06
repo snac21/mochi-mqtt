@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mochi-mqtt/server/v2/client"
 	"github.com/mochi-mqtt/server/v2/hooks/storage"
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
@@ -51,8 +52,8 @@ func (h *AllowHook) Provides(b byte) bool {
 	return bytes.Contains([]byte{OnConnectAuthenticate, OnACLCheck}, []byte{b})
 }
 
-func (h *AllowHook) OnConnectAuthenticate(cl *Client, pk packets.Packet) bool { return true }
-func (h *AllowHook) OnACLCheck(cl *Client, topic string, write bool) bool     { return true }
+func (h *AllowHook) OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool { return true }
+func (h *AllowHook) OnACLCheck(cl client.Client, topic string, write bool) bool     { return true }
 
 type DenyHook struct {
 	HookBase
@@ -71,8 +72,8 @@ func (h *DenyHook) Provides(b byte) bool {
 	return bytes.Contains([]byte{OnConnectAuthenticate, OnACLCheck}, []byte{b})
 }
 
-func (h *DenyHook) OnConnectAuthenticate(cl *Client, pk packets.Packet) bool { return false }
-func (h *DenyHook) OnACLCheck(cl *Client, topic string, write bool) bool     { return false }
+func (h *DenyHook) OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool { return false }
+func (h *DenyHook) OnACLCheck(cl client.Client, topic string, write bool) bool     { return false }
 
 type DelayHook struct {
 	HookBase
@@ -92,7 +93,7 @@ func (h *DelayHook) Provides(b byte) bool {
 	return bytes.Contains([]byte{OnDisconnect}, []byte{b})
 }
 
-func (h *DelayHook) OnDisconnect(cl *Client, err error, expire bool) {
+func (h *DelayHook) OnDisconnect(cl client.Client, err error, expire bool) {
 	time.Sleep(h.DisconnectDelay)
 }
 
@@ -172,27 +173,27 @@ func TestServerNewClient(t *testing.T) {
 	s.Log = logger
 	r, _ := net.Pipe()
 
-	cl := s.NewClient(r, "testing", "test", false)
+	cl := s.NewClient(r, "testing", "test", false).(*client.BaseClient)
 	require.NotNil(t, cl)
-	require.Equal(t, "test", cl.ID)
-	require.Equal(t, "testing", cl.Net.Listener)
+	require.Equal(t, "test", cl.GetID())
+	require.Equal(t, "testing", cl.GetConnection().Listener)
 	require.False(t, cl.Net.Inline)
-	require.NotNil(t, cl.State.Inflight.internal)
+	require.NotNil(t, cl.State.Inflight.GetAll(false))
 	require.NotNil(t, cl.State.Subscriptions)
 	require.NotNil(t, cl.State.TopicAliases)
-	require.Equal(t, defaultKeepalive, cl.State.Keepalive)
-	require.Equal(t, defaultClientProtocolVersion, cl.Properties.ProtocolVersion)
+	require.Equal(t, uint16(10), cl.State.Keepalive)
+	require.Equal(t, uint8(4), cl.Properties.ProtocolVersion)
 	require.NotNil(t, cl.Net.Transport)
 	tcpTr, ok := cl.Net.Transport.(*transport.TCPTransport)
 	require.True(t, ok)
 	require.NotNil(t, tcpTr.Bconn)
-	require.NotNil(t, cl.ops)
-	require.Equal(t, s.Log, cl.ops.log)
+	require.NotNil(t, cl.Ops)
+	require.Equal(t, s.Log, cl.Ops.Log)
 }
 
 func TestServerNewClientInline(t *testing.T) {
 	s := New(nil)
-	cl := s.NewClient(nil, "testing", "test", true)
+	cl := s.NewClient(nil, "testing", "test", true).(*client.BaseClient)
 	require.True(t, cl.Net.Inline)
 }
 
@@ -667,8 +668,9 @@ func TestEstablishConnectionInheritExisting(t *testing.T) {
 	_ = w.Close()
 	_ = r.Close()
 
-	clw, ok := s.Clients.Get(packets.TPacketData[packets.Connect].Get(packets.TConnectMqtt311).Packet.Connect.ClientIdentifier)
+	clwInterface, ok := s.Clients.Get(packets.TPacketData[packets.Connect].Get(packets.TConnectMqtt311).Packet.Connect.ClientIdentifier)
 	require.True(t, ok)
+	clw := clwInterface.(*client.BaseClient)
 	require.NotEmpty(t, clw.State.Subscriptions)
 	require.True(t, cl.IsTakenOver())
 
@@ -719,8 +721,9 @@ func TestEstablishConnectionInheritExistingTrueTakeover(t *testing.T) {
 
 	// Get the first client pointer
 	time.Sleep(time.Millisecond * 50)
-	cl1, ok := s.Clients.Get(packets.TPacketData[packets.Connect].Get(packets.TConnectUserPass).Packet.Connect.ClientIdentifier)
+	cl1Interface, ok := s.Clients.Get(packets.TPacketData[packets.Connect].Get(packets.TConnectUserPass).Packet.Connect.ClientIdentifier)
 	require.True(t, ok)
+	cl1 := cl1Interface.(*client.BaseClient)
 	cl1.State.Subscriptions.Add("a/b/c", packets.Subscription{Filter: "a/b/c", Qos: 1})
 	cl1.State.Subscriptions.Add("d/e/f", packets.Subscription{Filter: "d/e/f", Qos: 0})
 	time.Sleep(time.Millisecond * 50)
@@ -747,8 +750,9 @@ func TestEstablishConnectionInheritExistingTrueTakeover(t *testing.T) {
 	}()
 
 	// Capture first Client pointer
-	clp1, ok := s.Clients.Get("zen")
+	clp1Interface, ok := s.Clients.Get("zen")
 	require.True(t, ok)
+	clp1 := clp1Interface.(*client.BaseClient)
 	require.Empty(t, clp1.Properties.Username)
 	require.NotEmpty(t, clp1.State.Subscriptions.GetAll())
 
@@ -757,8 +761,9 @@ func TestEstablishConnectionInheritExistingTrueTakeover(t *testing.T) {
 	require.ErrorIs(t, err1, io.ErrClosedPipe)
 
 	// Capture second Client pointer
-	clp2, ok := s.Clients.Get("zen")
+	clp2Interface, ok := s.Clients.Get("zen")
 	require.True(t, ok)
+	clp2 := clp2Interface.(*client.BaseClient)
 	require.Equal(t, []byte(".ochi"), clp2.Properties.Username)
 	require.NotEmpty(t, clp2.State.Subscriptions.GetAll())
 	require.Empty(t, clp1.State.Subscriptions.GetAll())
@@ -778,7 +783,7 @@ func TestEstablishConnectionResentPendingInflightsError(t *testing.T) {
 	cl, r0, _ := newTestClient()
 	cl.Properties.ProtocolVersion = 5
 	cl.ID = packets.TPacketData[packets.Connect].Get(packets.TConnectMqtt311).Packet.Connect.ClientIdentifier
-	cl.State.Inflight = NewInflights()
+	cl.State.Inflight = client.NewInflights()
 	cl.State.Inflight.Set(packets.Packet{PacketID: 2, Created: n - 2}) // no packet type
 	s.Clients.Add(cl)
 
@@ -860,8 +865,9 @@ func TestEstablishConnectionInheritExistingClean(t *testing.T) {
 	_ = w.Close()
 	_ = r.Close()
 
-	clw, ok := s.Clients.Get(packets.TPacketData[packets.Connect].Get(packets.TConnectMqtt311).Packet.Connect.ClientIdentifier)
+	clwInterface, ok := s.Clients.Get(packets.TPacketData[packets.Connect].Get(packets.TConnectMqtt311).Packet.Connect.ClientIdentifier)
 	require.True(t, ok)
+	clw := clwInterface.(*client.BaseClient)
 	require.Equal(t, 0, clw.State.Subscriptions.Len())
 
 }
@@ -1142,42 +1148,42 @@ func TestServerValidateConnect(t *testing.T) {
 	packetCleanIdPacket.Connect.ClientIdentifier = ""
 	tt := []struct {
 		desc         string
-		client       *Client
+		client       *client.BaseClient
 		capabilities Capabilities
 		packet       packets.Packet
 		expect       packets.Code
 	}{
 		{
 			desc:         "unsupported protocol version",
-			client:       &Client{Properties: ClientProperties{ProtocolVersion: 3}},
+			client:       &client.BaseClient{Properties: client.ClientProperties{ProtocolVersion: 3}},
 			capabilities: Capabilities{MinimumProtocolVersion: 4},
 			packet:       packet,
 			expect:       packets.ErrUnsupportedProtocolVersion,
 		},
 		{
 			desc:         "will qos not supported",
-			client:       &Client{Properties: ClientProperties{Will: Will{Qos: 2}}},
+			client:       &client.BaseClient{Properties: client.ClientProperties{Will: client.Will{Qos: 2}}},
 			capabilities: Capabilities{MaximumQos: 1},
 			packet:       packet,
 			expect:       packets.ErrQosNotSupported,
 		},
 		{
 			desc:         "retain not supported",
-			client:       &Client{Properties: ClientProperties{Will: Will{Retain: true}}},
+			client:       &client.BaseClient{Properties: client.ClientProperties{Will: client.Will{Retain: true}}},
 			capabilities: Capabilities{RetainAvailable: 0},
 			packet:       packet,
 			expect:       packets.ErrRetainNotSupported,
 		},
 		{
 			desc:         "invalid packet validate",
-			client:       &Client{Properties: ClientProperties{Will: Will{Retain: true}}},
+			client:       &client.BaseClient{Properties: client.ClientProperties{Will: client.Will{Retain: true}}},
 			capabilities: Capabilities{RetainAvailable: 0},
 			packet:       invalidBitPacket,
 			expect:       packets.ErrProtocolViolationReservedBit,
 		},
 		{
 			desc:         "mqtt3 clean no client id ",
-			client:       &Client{Properties: ClientProperties{ProtocolVersion: 3}},
+			client:       &client.BaseClient{Properties: client.ClientProperties{ProtocolVersion: 3}},
 			capabilities: Capabilities{},
 			packet:       packetCleanIdPacket,
 			expect:       packets.ErrUnspecifiedError,
@@ -1221,7 +1227,7 @@ func TestInheritClientSession(t *testing.T) {
 	existing.Net.Transport = nil
 	existing.ID = "mochi"
 	existing.State.Subscriptions.Add("a/b/c", packets.Subscription{Filter: "a/b/c", Qos: 1})
-	existing.State.Inflight = NewInflights()
+	existing.State.Inflight = client.NewInflights()
 	existing.State.Inflight.Set(packets.Packet{PacketID: 1, Created: n - 1})
 	existing.State.Inflight.Set(packets.Packet{PacketID: 2, Created: n - 2})
 
@@ -1253,7 +1259,7 @@ func TestServerUnsubscribeClient(t *testing.T) {
 	cl, _, _ := newTestClient()
 	pk := packets.Subscription{Filter: "a/b/c", Qos: 1}
 	cl.State.Subscriptions.Add("a/b/c", pk)
-	s.Topics.Subscribe(cl.ID, pk)
+	s.Topics.Subscribe(cl.GetID(), pk)
 	subs := s.Topics.Subscribers("a/b/c")
 	require.Equal(t, 1, len(subs.Subscriptions))
 	s.UnsubscribeClient(cl)
@@ -1861,12 +1867,12 @@ func TestPublishToSubscribersSelfNoLocal(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", NoLocal: true})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", NoLocal: true})
 	require.True(t, subbed)
 
 	go func() {
 		pkx := *packets.TPacketData[packets.Publish].Get(packets.TPublishBasic).Packet
-		pkx.Origin = cl.ID
+		pkx.Origin = cl.GetID()
 		s.publishToSubscribers(pkx)
 		time.Sleep(time.Millisecond)
 		_ = w.Close()
@@ -1893,7 +1899,7 @@ func TestPublishToSubscribers(t *testing.T) {
 	s.Clients.Add(cl)
 	s.Clients.Add(cl2)
 	s.Clients.Add(cl3)
-	require.True(t, s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c"}))
+	require.True(t, s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c"}))
 	require.True(t, s.Topics.Subscribe(cl2.ID, packets.Subscription{Filter: SharePrefix + "/tmp/a/b/c"}))
 	require.True(t, s.Topics.Subscribe(cl3.ID, packets.Subscription{Filter: SharePrefix + "/tmp/a/b/c"}))
 
@@ -1950,7 +1956,7 @@ func TestPublishToSubscribersMessageExpiryDelta(t *testing.T) {
 	cl.ID = "cl1"
 	cl.Properties.ProtocolVersion = 5
 	s.Clients.Add(cl)
-	require.True(t, s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c"}))
+	require.True(t, s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c"}))
 
 	cl1Recv := make(chan []byte)
 	go func() {
@@ -1978,11 +1984,11 @@ func TestPublishToSubscribersIdentifiers(t *testing.T) {
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 5
 	s.Clients.Add(cl)
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/+", Identifier: 2})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/+", Identifier: 2})
 	require.True(t, subbed)
-	subbed = s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/#", Identifier: 3})
+	subbed = s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/#", Identifier: 3})
 	require.True(t, subbed)
-	subbed = s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "d/e/f", Identifier: 4})
+	subbed = s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "d/e/f", Identifier: 4})
 	require.True(t, subbed)
 
 	go func() {
@@ -2005,7 +2011,7 @@ func TestPublishToSubscribersPkIgnore(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "#", Identifier: 1})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "#", Identifier: 1})
 	require.True(t, subbed)
 
 	go func() {
@@ -2035,7 +2041,7 @@ func TestPublishToClientServerDowngradeQos(t *testing.T) {
 
 	_, ok := cl.State.Inflight.Get(1)
 	require.False(t, ok)
-	cl.State.packetID = 6 // just to match the same packet id (7) in the fixtures
+	cl.State.PacketID = 6 // just to match the same packet id (7) in the fixtures
 
 	go func() {
 		pkx := *packets.TPacketData[packets.Publish].Get(packets.TPublishQos1).Packet
@@ -2064,7 +2070,7 @@ func TestPublishToClientSubscriptionDowngradeQos(t *testing.T) {
 
 	_, ok := cl.State.Inflight.Get(1)
 	require.False(t, ok)
-	cl.State.packetID = 6 // just to match the same packet id (7) in the fixtures
+	cl.State.PacketID = 6 // just to match the same packet id (7) in the fixtures
 
 	go func() {
 		pkx := *packets.TPacketData[packets.Publish].Get(packets.TPublishQos1).Packet
@@ -2089,25 +2095,20 @@ func TestPublishToClientExceedClientWritesPending(t *testing.T) {
 	s := newServer()
 
 	_, w := net.Pipe()
-	cl := newClient(w, &ops{
-		info:  new(system.Info),
-		hooks: new(Hooks),
-		log:   logger,
-		options: &Options{
-			Capabilities: &Capabilities{
-				MaximumClientWritesPending: 3,
-				maximumPacketID:            10,
-			},
-		},
-	})
+	cl := client.NewTCPClient(w, &client.Ops{
+		MaximumClientWritesPending: 3,
+		MaximumPacketID:            10,
+		Callbacks:                  &clientCallbacks{s: s},
+		Log:                        logger,
+	}).(*client.BaseClient)
 	cl.Properties.Props.ReceiveMaximum = sendQuota
 	cl.State.Inflight.ResetSendQuota(int32(cl.Properties.Props.ReceiveMaximum))
 
 	s.Clients.Add(cl)
 
-	for i := int32(0); i < cl.ops.options.Capabilities.MaximumClientWritesPending; i++ {
-		cl.State.outbound <- new(packets.Packet)
-		atomic.AddInt32(&cl.State.outboundQty, 1)
+	for i := int32(0); i < cl.Ops.MaximumClientWritesPending; i++ {
+		cl.State.Outbound <- new(packets.Packet)
+		atomic.AddInt32(&cl.State.OutboundQty, 1)
 	}
 
 	id, _ := cl.NextPacketID()
@@ -2184,7 +2185,7 @@ func TestPublishToClientExceedMaximumInflight(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
 	s.Options.Capabilities.MaximumInflight = MaxInflight
-	cl.ops.options.Capabilities.MaximumInflight = MaxInflight
+	s.Options.Capabilities.MaximumInflight = MaxInflight
 	for i := uint16(0); i < MaxInflight; i++ {
 		cl.State.Inflight.Set(packets.Packet{PacketID: i})
 	}
@@ -2198,7 +2199,7 @@ func TestPublishToClientExceedMaximumInflight(t *testing.T) {
 func TestPublishToClientExhaustedPacketID(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
-	for i := uint32(0); i <= cl.ops.options.Capabilities.maximumPacketID; i++ {
+	for i := uint32(0); i <= s.Options.Capabilities.maximumPacketID; i++ {
 		cl.State.Inflight.Set(packets.Packet{PacketID: uint16(i)})
 	}
 
@@ -2235,7 +2236,7 @@ func TestProcessPublishWithTopicAlias(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 0})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", Qos: 0})
 	require.True(t, subbed)
 
 	cl2, _, w2 := newTestClient()
@@ -2262,9 +2263,9 @@ func TestPublishToSubscribersExhaustedSendQuota(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	cl.State.Inflight.sendQuotaState.value = 0
+	cl.State.Inflight.SetSendQuota(0)
 
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", Qos: 2})
 	require.True(t, subbed)
 
 	// coverage: subscriber publish errors are non-returnable
@@ -2281,11 +2282,11 @@ func TestPublishToSubscribersExhaustedPacketIDs(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	for i := uint32(0); i <= cl.ops.options.Capabilities.maximumPacketID; i++ {
+	for i := uint32(0); i <= s.Options.Capabilities.maximumPacketID; i++ {
 		cl.State.Inflight.Set(packets.Packet{PacketID: 1})
 	}
 
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", Qos: 2})
 	require.True(t, subbed)
 
 	// coverage: subscriber publish errors are non-returnable
@@ -2302,7 +2303,7 @@ func TestPublishToSubscribersNoConnection(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", Qos: 2})
 	require.True(t, subbed)
 
 	// coverage: subscriber publish errors are non-returnable
@@ -2318,7 +2319,7 @@ func TestPublishRetainedToClient(t *testing.T) {
 	cl, r, w := newTestClient()
 	s.Clients.Add(cl)
 
-	subbed := s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
+	subbed := s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", Qos: 2})
 	require.True(t, subbed)
 
 	retained := s.Topics.RetainMessage(*packets.TPacketData[packets.Publish].Get(packets.TPublishRetainMqtt5).Packet)
@@ -2341,7 +2342,7 @@ func TestPublishRetainedToClientIsShared(t *testing.T) {
 	s.Clients.Add(cl)
 
 	sub := packets.Subscription{Filter: SharePrefix + "/test/a/b/c"}
-	subbed := s.Topics.Subscribe(cl.ID, sub)
+	subbed := s.Topics.Subscribe(cl.GetID(), sub)
 	require.True(t, subbed)
 
 	go func() {
@@ -2360,7 +2361,7 @@ func TestPublishRetainedToClientError(t *testing.T) {
 	s.Clients.Add(cl)
 
 	sub := packets.Subscription{Filter: "a/b/c"}
-	subbed := s.Topics.Subscribe(cl.ID, sub)
+	subbed := s.Topics.Subscribe(cl.GetID(), sub)
 	require.True(t, subbed)
 
 	retained := s.Topics.RetainMessage(*packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
@@ -2376,7 +2377,7 @@ func TestNoRetainMessageIfUnavailable(t *testing.T) {
 	cl, _, _ := newTestClient()
 	s.Clients.Add(cl)
 
-	s.retainMessage(new(Client), *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
+	s.retainMessage(new(client.BaseClient), *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
 	require.Equal(t, int64(0), atomic.LoadInt64(&s.Info.Retained))
 }
 
@@ -2387,7 +2388,7 @@ func TestNoRetainMessageIfPkIgnore(t *testing.T) {
 
 	pk := *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet
 	pk.Ignore = true
-	s.retainMessage(new(Client), pk)
+	s.retainMessage(new(client.BaseClient), pk)
 	require.Equal(t, int64(0), atomic.LoadInt64(&s.Info.Retained))
 }
 
@@ -2396,7 +2397,7 @@ func TestNoRetainMessage(t *testing.T) {
 	cl, _, _ := newTestClient()
 	s.Clients.Add(cl)
 
-	s.retainMessage(new(Client), *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
+	s.retainMessage(new(client.BaseClient), *packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
 	require.Equal(t, int64(1), atomic.LoadInt64(&s.Info.Retained))
 }
 
@@ -2417,8 +2418,8 @@ func TestServerProcessPacketPuback(t *testing.T) {
 			pID := uint16(7)
 			s := newServer()
 			cl, _, _ := newTestClient()
-			cl.State.Inflight.sendQuotaState.value = 3
-			cl.State.Inflight.receiveQuotaState.value = 3
+			cl.State.Inflight.SetSendQuota(3)
+			cl.State.Inflight.SetReceiveQuota(3)
 
 			cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 			atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2439,8 +2440,8 @@ func TestServerProcessPacketPuback(t *testing.T) {
 func TestServerProcessPacketPubackNoPacketID(t *testing.T) {
 	s := newServer()
 	cl, _, _ := newTestClient()
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 
 	pk := *packets.TPacketData[packets.Puback].Get(packets.TPuback).Packet
 	err := s.processPacket(cl, pk)
@@ -2454,8 +2455,8 @@ func TestServerProcessPacketPubrec(t *testing.T) {
 	pID := uint16(7)
 	s := newServer()
 	cl, r, w := newTestClient()
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 
 	cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 	atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2484,8 +2485,8 @@ func TestServerProcessPacketPubrecNoPacketID(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 5
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 
 	recv := make(chan []byte)
 	go func() { // receive the ack
@@ -2532,8 +2533,8 @@ func TestServerProcessPacketPubrel(t *testing.T) {
 	pID := uint16(7)
 	s := newServer()
 	cl, r, w := newTestClient()
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 
 	cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 	atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2563,8 +2564,8 @@ func TestServerProcessPacketPubrelNoPacketID(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 5
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 
 	recv := make(chan []byte)
 	go func() { // receive the ack
@@ -2625,8 +2626,8 @@ func TestServerProcessPacketPubcomp(t *testing.T) {
 			s := newServer()
 			cl, _, _ := newTestClient()
 			cl.Properties.ProtocolVersion = tx.protocolVersion
-			cl.State.Inflight.sendQuotaState.value = 3
-			cl.State.Inflight.receiveQuotaState.value = 3
+			cl.State.Inflight.SetSendQuota(3)
+			cl.State.Inflight.SetReceiveQuota(3)
 
 			cl.State.Inflight.Set(packets.Packet{PacketID: pID})
 			atomic.AddInt64(&s.Info.Inflight, 1)
@@ -2671,13 +2672,13 @@ func TestServerProcessInboundQos2Flow(t *testing.T) {
 	pID := uint16(7)
 	s := newServer()
 	cl, r, w := newTestClient()
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 
 	for i, tx := range tt {
 		t.Run("qos step"+strconv.Itoa(i), func(t *testing.T) {
 			r, w = net.Pipe()
-			cl.Net.Transport = transport.NewTCPTransport(w, cl.ops.options.ClientNetReadBufferSize)
+			cl.Net.Transport = transport.NewTCPTransport(w, s.Options.ClientNetReadBufferSize)
 
 			recv := make(chan []byte)
 			go func() { // receive the ack
@@ -2742,16 +2743,16 @@ func TestServerProcessOutboundQos2Flow(t *testing.T) {
 	pID := uint16(6)
 	s := newServer()
 	cl, _, _ := newTestClient()
-	cl.State.packetID = uint32(6)
-	cl.State.Inflight.sendQuotaState.value = 3
-	cl.State.Inflight.receiveQuotaState.value = 3
+	cl.State.PacketID = uint32(6)
+	cl.State.Inflight.SetSendQuota(3)
+	cl.State.Inflight.SetReceiveQuota(3)
 	s.Clients.Add(cl)
-	s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c", Qos: 2})
+	s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c", Qos: 2})
 
 	for i, tx := range tt {
 		t.Run("qos step"+strconv.Itoa(i), func(t *testing.T) {
 			r, w := net.Pipe()
-			cl.Net.Transport = transport.NewTCPTransport(w, cl.ops.options.ClientNetReadBufferSize)
+			cl.Net.Transport = transport.NewTCPTransport(w, s.Options.ClientNetReadBufferSize)
 
 			recv := make(chan []byte)
 			go func() { // receive the ack
@@ -2904,7 +2905,7 @@ func TestServerProcessSubscribeDowngradeQos(t *testing.T) {
 func TestServerProcessSubscribeWithRetainHandling1(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
-	s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b/c"})
+	s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b/c"})
 	s.Clients.Add(cl)
 
 	retained := s.Topics.RetainMessage(*packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
@@ -3020,7 +3021,7 @@ func TestServerProcessSubscribeErrorDowngrade(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 3
-	cl.State.packetID = 1 // just to match the same packet id (7) in the fixtures
+	cl.State.PacketID = 1 // just to match the same packet id (7) in the fixtures
 
 	go func() {
 		err := s.processPacket(cl, *packets.TPacketData[packets.Subscribe].Get(packets.TSubscribeInvalidSharedNoLocal).Packet)
@@ -3037,7 +3038,7 @@ func TestServerProcessPacketUnsubscribe(t *testing.T) {
 	s := newServer()
 	cl, r, w := newTestClient()
 	cl.Properties.ProtocolVersion = 5
-	s.Topics.Subscribe(cl.ID, packets.Subscription{Filter: "a/b", Qos: 0})
+	s.Topics.Subscribe(cl.GetID(), packets.Subscription{Filter: "a/b", Qos: 0})
 	go func() {
 		err := s.processPacket(cl, *packets.TPacketData[packets.Unsubscribe].Get(packets.TUnsubscribeMqtt5).Packet)
 		require.NoError(t, err)
@@ -3123,7 +3124,7 @@ func TestServerProcessPacketDisconnect(t *testing.T) {
 	cl.Properties.Props.SessionExpiryInterval = 30
 	cl.Properties.ProtocolVersion = 5
 
-	s.loop.willDelayed.Add(cl.ID, packets.Packet{TopicName: "a/b/c", Payload: []byte("hello")})
+	s.loop.willDelayed.Add(cl.GetID(), packets.Packet{TopicName: "a/b/c", Payload: []byte("hello")})
 	require.Equal(t, 1, s.loop.willDelayed.Len())
 
 	err := s.processPacket(cl, *packets.TPacketData[packets.Disconnect].Get(packets.TDisconnectMqtt5).Packet)
@@ -3131,7 +3132,7 @@ func TestServerProcessPacketDisconnect(t *testing.T) {
 
 	require.Equal(t, 0, s.loop.willDelayed.Len())
 	require.True(t, cl.Closed())
-	require.Equal(t, time.Now().Unix(), atomic.LoadInt64(&cl.State.disconnected))
+	require.Equal(t, time.Now().Unix(), atomic.LoadInt64(&cl.State.Disconnected))
 }
 
 func TestServerProcessPacketDisconnectNonZeroExpiryViolation(t *testing.T) {
@@ -3153,7 +3154,7 @@ func TestServerProcessPacketDisconnectDisconnectWithWillMessage(t *testing.T) {
 	cl.Properties.Props.SessionExpiryInterval = 30
 	cl.Properties.ProtocolVersion = 5
 
-	s.loop.willDelayed.Add(cl.ID, packets.Packet{TopicName: "a/b/c", Payload: []byte("hello")})
+	s.loop.willDelayed.Add(cl.GetID(), packets.Packet{TopicName: "a/b/c", Payload: []byte("hello")})
 	require.Equal(t, 1, s.loop.willDelayed.Len())
 
 	err := s.processPacket(cl, *packets.TPacketData[packets.Disconnect].Get(packets.TDisconnectMqtt5DisconnectWithWillMessage).Packet)
@@ -3209,7 +3210,7 @@ func TestServerSendLWT(t *testing.T) {
 
 	sender, _, w1 := newTestClient()
 	sender.ID = "sender"
-	sender.Properties.Will = Will{
+	sender.Properties.Will = client.Will{
 		Flag:      1,
 		TopicName: "a/b/c",
 		Payload:   []byte("hello mochi"),
@@ -3248,7 +3249,7 @@ func TestServerSendLWTRetain(t *testing.T) {
 
 	sender, _, w1 := newTestClient()
 	sender.ID = "sender"
-	sender.Properties.Will = Will{
+	sender.Properties.Will = client.Will{
 		Flag:      1,
 		TopicName: "a/b/c",
 		Payload:   []byte("hello mochi"),
@@ -3285,7 +3286,7 @@ func TestServerSendLWTDelayed(t *testing.T) {
 	s := newServer()
 	cl1, _, _ := newTestClient()
 	cl1.ID = "cl1"
-	cl1.Properties.Will = Will{
+	cl1.Properties.Will = client.Will{
 		Flag:              1,
 		TopicName:         "a/b/c",
 		Payload:           []byte("hello mochi"),
@@ -3383,9 +3384,10 @@ func TestServerLoadClients(t *testing.T) {
 	require.Equal(t, 0, s.Clients.Len())
 	s.loadClients(v)
 	require.Equal(t, 6, s.Clients.Len())
-	cl, ok := s.Clients.Get("mochi")
+	clInterface, ok := s.Clients.Get("mochi")
 	require.True(t, ok)
-	require.Equal(t, "mochi", cl.ID)
+	cl := clInterface.(*client.BaseClient)
+	require.Equal(t, "mochi", cl.GetID())
 
 	_, ok = s.Clients.Get("v3-clean")
 	require.False(t, ok)
@@ -3432,18 +3434,20 @@ func TestServerLoadInflightMessages(t *testing.T) {
 	}
 	s.loadInflight(v)
 
-	cl, ok := s.Clients.Get("mochi")
+	clInterface, ok := s.Clients.Get("mochi")
 	require.True(t, ok)
-	require.Equal(t, "mochi", cl.ID)
+	cl := clInterface.(*client.BaseClient)
+	require.Equal(t, "mochi", cl.GetID())
 
 	msg, ok := cl.State.Inflight.Get(2)
 	require.True(t, ok)
 	require.Equal(t, []byte{'y', 'e', 's'}, msg.Payload)
 	require.Equal(t, "a/b/c", msg.TopicName)
 
-	cl, ok = s.Clients.Get("mochi-co")
+	clInterface2, ok := s.Clients.Get("mochi-co")
 	require.True(t, ok)
-	msg, ok = cl.State.Inflight.Get(4)
+	cl2 := clInterface2.(*client.BaseClient)
+	msg, ok = cl2.State.Inflight.Get(4)
 	require.True(t, ok)
 }
 
@@ -3469,7 +3473,7 @@ func TestServerClose(t *testing.T) {
 	_ = s.AddHook(hook, nil)
 
 	cl, r, _ := newTestClient()
-	cl.Net.Listener = "t1"
+	cl.GetConnection().Listener = "t1"
 	cl.Properties.ProtocolVersion = 5
 	s.Clients.Add(cl)
 
@@ -3505,7 +3509,7 @@ func TestServerClearExpiredInflights(t *testing.T) {
 
 	n := time.Now().Unix()
 	cl, _, _ := newTestClient()
-	cl.ops.info = s.Info
+	cl.Ops.Callbacks = &clientCallbacks{s: s}
 
 	cl.State.Inflight.Set(packets.Packet{PacketID: 1, Expiry: n - 1})
 	cl.State.Inflight.Set(packets.Packet{PacketID: 2, Expiry: n - 2})
@@ -3569,8 +3573,8 @@ func TestServerClearExpiredClients(t *testing.T) {
 	// No Expiry
 	cl0, _, _ := newTestClient()
 	cl0.ID = "c0"
-	cl0.State.disconnected = n - 10
-	cl0.State.cancelOpen()
+	cl0.State.Disconnected = n - 10
+	cl0.State.CancelOpen()
 	cl0.Properties.ProtocolVersion = 5
 	cl0.Properties.Props.SessionExpiryInterval = 12
 	cl0.Properties.Props.SessionExpiryIntervalFlag = true
@@ -3579,8 +3583,8 @@ func TestServerClearExpiredClients(t *testing.T) {
 	// Normal Expiry
 	cl1, _, _ := newTestClient()
 	cl1.ID = "c1"
-	cl1.State.disconnected = n - 10
-	cl1.State.cancelOpen()
+	cl1.State.Disconnected = n - 10
+	cl1.State.CancelOpen()
 	cl1.Properties.ProtocolVersion = 5
 	cl1.Properties.Props.SessionExpiryInterval = 8
 	cl1.Properties.Props.SessionExpiryIntervalFlag = true
@@ -3589,8 +3593,8 @@ func TestServerClearExpiredClients(t *testing.T) {
 	// No Expiry, indefinite session
 	cl2, _, _ := newTestClient()
 	cl2.ID = "c2"
-	cl2.State.disconnected = n - 10
-	cl2.State.cancelOpen()
+	cl2.State.Disconnected = n - 10
+	cl2.State.CancelOpen()
 	cl2.Properties.ProtocolVersion = 5
 	cl2.Properties.Props.SessionExpiryInterval = 0
 	cl2.Properties.Props.SessionExpiryIntervalFlag = true
@@ -3618,8 +3622,21 @@ func TestItoa(t *testing.T) {
 	require.Equal(t, "22", Int64toa(i))
 }
 
+func newTestClient() (cl *client.BaseClient, r net.Conn, w net.Conn) {
+	r, w = net.Pipe()
+	s := New(nil)
+	clInterface := s.NewClient(w, "tcp1", "mochi", false)
+	cl = clInterface.(*client.BaseClient)
+	cl.State.Inflight.ResetSendQuota(5)
+	cl.State.Inflight.ResetReceiveQuota(10)
+	cl.Properties.Props.TopicAliasMaximum = 0
+	cl.Properties.Props.RequestResponseInfo = 0x1
+	go cl.WriteLoop()
+	return
+}
+
 func TestServerSubscribe(t *testing.T) {
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {}
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {}
 
 	s := newServerWithInlineClient()
 	require.NotNil(t, s)
@@ -3663,7 +3680,7 @@ func TestServerSubscribe(t *testing.T) {
 			desc:       "subscribe different handler",
 			filter:     "a/b/c",
 			identifier: 1,
-			handler:    func(cl *Client, sub packets.Subscription, pk packets.Packet) {},
+			handler:    func(cl client.Client, sub packets.Subscription, pk packets.Packet) {},
 			expect:     nil,
 		},
 		{
@@ -3698,13 +3715,13 @@ func TestServerSubscribe(t *testing.T) {
 
 func TestServerSubscribeNoInlineClient(t *testing.T) {
 	s := newServer()
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {})
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrInlineClientNotEnabled)
 }
 
 func TestServerUnsubscribe(t *testing.T) {
-	handler := func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	handler := func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		// handler logic
 	}
 
@@ -3744,10 +3761,10 @@ func TestServerUnsubscribeNoInlineClient(t *testing.T) {
 func TestPublishToInlineSubscriber(t *testing.T) {
 	s := newServerWithInlineClient()
 	finishCh := make(chan bool)
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
@@ -3767,20 +3784,20 @@ func TestPublishToInlineSubscribersDifferentFilter(t *testing.T) {
 	subNumber := 2
 	finishCh := make(chan bool, subNumber)
 
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
 	})
 	require.Nil(t, err)
 
-	err = s.Subscribe("z/e/n", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err = s.Subscribe("z/e/n", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("mochi mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "z/e/n", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
@@ -3805,20 +3822,20 @@ func TestPublishToInlineSubscribersDifferentIdentifier(t *testing.T) {
 	subNumber := 2
 	finishCh := make(chan bool, subNumber)
 
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
 	})
 	require.Nil(t, err)
 
-	err = s.Subscribe("a/b/c", 2, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err = s.Subscribe("a/b/c", 2, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 2, sub.Identifier)
 		finishCh <- true
@@ -3843,10 +3860,10 @@ func TestServerSubscribeWithRetain(t *testing.T) {
 	retained := s.Topics.RetainMessage(*packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
 	require.Equal(t, int64(1), retained)
 
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
@@ -3865,20 +3882,20 @@ func TestServerSubscribeWithRetainDifferentFilter(t *testing.T) {
 	retained = s.Topics.RetainMessage(*packets.TPacketData[packets.Publish].Get(packets.TPublishCopyBasic).Packet)
 	require.Equal(t, int64(1), retained)
 
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
 	})
 	require.Nil(t, err)
 
-	err = s.Subscribe("z/e/n", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err = s.Subscribe("z/e/n", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("mochi mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "z/e/n", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
@@ -3898,20 +3915,20 @@ func TestServerSubscribeWithRetainDifferentIdentifier(t *testing.T) {
 	retained := s.Topics.RetainMessage(*packets.TPacketData[packets.Publish].Get(packets.TPublishRetain).Packet)
 	require.Equal(t, int64(1), retained)
 
-	err := s.Subscribe("a/b/c", 1, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err := s.Subscribe("a/b/c", 1, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 1, sub.Identifier)
 		finishCh <- true
 	})
 	require.Nil(t, err)
 
-	err = s.Subscribe("a/b/c", 2, func(cl *Client, sub packets.Subscription, pk packets.Packet) {
+	err = s.Subscribe("a/b/c", 2, func(cl client.Client, sub packets.Subscription, pk packets.Packet) {
 		require.Equal(t, []byte("hello mochi"), pk.Payload)
-		require.Equal(t, InlineClientId, cl.ID)
-		require.Equal(t, LocalListener, cl.Net.Listener)
+		require.Equal(t, InlineClientId, cl.GetID())
+		require.Equal(t, LocalListener, cl.GetConnection().Listener)
 		require.Equal(t, "a/b/c", sub.Filter)
 		require.Equal(t, 2, sub.Identifier)
 		finishCh <- true

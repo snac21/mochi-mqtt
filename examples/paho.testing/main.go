@@ -5,6 +5,7 @@
 package main
 
 import (
+	"github.com/mochi-mqtt/server/v2/client"
 	"bytes"
 	"log"
 	"os"
@@ -69,19 +70,19 @@ func (h *pahoAuthHook) Provides(b byte) bool {
 	}, []byte{b})
 }
 
-func (h *pahoAuthHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
+func (h *pahoAuthHook) OnConnectAuthenticate(cl client.Client, pk packets.Packet) bool {
 	return true
 }
 
-func (h *pahoAuthHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
+func (h *pahoAuthHook) OnACLCheck(cl client.Client, topic string, write bool) bool {
 	return topic != "test/nosubscribe"
 }
 
-func (h *pahoAuthHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
+func (h *pahoAuthHook) OnConnect(cl client.Client, pk packets.Packet) error {
 	// Handle paho test_server_keep_alive
 	if pk.Connect.Keepalive == 120 && pk.Connect.Clean {
-		cl.State.Keepalive = 60
-		cl.State.ServerKeepalive = true
+		cl.GetState().Keepalive = 60
+		cl.GetState().ServerKeepalive = true
 	}
 	return nil
 }

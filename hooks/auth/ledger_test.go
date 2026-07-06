@@ -5,9 +5,10 @@
 package auth
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"testing"
 
-	"github.com/mochi-mqtt/server/v2"
+
 	"github.com/mochi-mqtt/server/v2/packets"
 	"github.com/stretchr/testify/require"
 )
@@ -76,18 +77,18 @@ func TestRStringMatches(t *testing.T) {
 func TestCanAuthenticate(t *testing.T) {
 	tt := []struct {
 		desc   string
-		client *mqtt.Client
+		client clt.Client
 		pk     packets.Packet
 		n      int
 		ok     bool
 	}{
 		{
 			desc: "allow all local 127.0.0.1",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
-				Net: mqtt.ClientConnection{
+				Net: clt.ClientConnection{
 					Remote: "127.0.0.1",
 				},
 			},
@@ -97,8 +98,8 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "allow username/password",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -108,8 +109,8 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "deny username/password",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -119,11 +120,11 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "allow all local 127.0.0.1",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
-				Net: mqtt.ClientConnection{
+				Net: clt.ClientConnection{
 					Remote: "127.0.0.1",
 				},
 			},
@@ -133,8 +134,8 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "allow username/password",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -144,8 +145,8 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "deny username/password",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -155,11 +156,11 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "deny client from address",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("not-mochi"),
 				},
-				Net: mqtt.ClientConnection{
+				Net: clt.ClientConnection{
 					Remote: "111.144.155.166",
 				},
 			},
@@ -169,11 +170,11 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "allow remote wildcard",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
-				Net: mqtt.ClientConnection{
+				Net: clt.ClientConnection{
 					Remote: "111.0.0.1",
 				},
 			},
@@ -183,11 +184,11 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "never allow username",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("banned-user"),
 				},
-				Net: mqtt.ClientConnection{
+				Net: clt.ClientConnection{
 					Remote: "127.0.0.1",
 				},
 			},
@@ -197,8 +198,8 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "matching user in users",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi-co"),
 				},
 			},
@@ -208,8 +209,8 @@ func TestCanAuthenticate(t *testing.T) {
 		},
 		{
 			desc: "never user in users",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("suspended-user"),
 				},
 			},
@@ -230,7 +231,7 @@ func TestCanAuthenticate(t *testing.T) {
 
 func TestCanACL(t *testing.T) {
 	tt := []struct {
-		client *mqtt.Client
+		client clt.Client
 		desc   string
 		topic  string
 		n      int
@@ -239,22 +240,22 @@ func TestCanACL(t *testing.T) {
 	}{
 		{
 			desc:   "allow normal write on any other filter",
-			client: &mqtt.Client{},
+			client: &clt.BaseClient{},
 			topic:  "default/acl/write/access",
 			write:  true,
 			ok:     true,
 		},
 		{
 			desc:   "allow normal read on any other filter",
-			client: &mqtt.Client{},
+			client: &clt.BaseClient{},
 			topic:  "default/acl/read/access",
 			write:  false,
 			ok:     true,
 		},
 		{
 			desc: "deny user on literal filter",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -262,8 +263,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "deny user on partial filter",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -271,8 +272,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow read/write to user path",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -282,8 +283,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "deny read on write-only path",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -293,8 +294,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "deny read on write-only path ext",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -304,8 +305,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow read on not-acl path (no #)",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -315,8 +316,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow write on write-only path",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -326,8 +327,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "deny write on read-only path",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -337,8 +338,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow read on read-only path",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -348,8 +349,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow $sys access to localhost",
-			client: &mqtt.Client{
-				Net: mqtt.ClientConnection{
+			client: &clt.BaseClient{
+				Net: clt.ClientConnection{
 					Remote: "localhost",
 				},
 			},
@@ -360,8 +361,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow $sys access to admin",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("admin"),
 				},
 			},
@@ -372,8 +373,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "deny $sys access to all others",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -384,8 +385,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "allow all with no filter",
-			client: &mqtt.Client{
-				Net: mqtt.ClientConnection{
+			client: &clt.BaseClient{
+				Net: clt.ClientConnection{
 					Remote: "001.002.003.004",
 				},
 			},
@@ -396,8 +397,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "use users embedded acl deny",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -407,8 +408,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "use users embedded acl any",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -418,8 +419,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "use users embedded acl write on read-only",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -429,8 +430,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "use users embedded acl read on read-only",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},
@@ -440,8 +441,8 @@ func TestCanACL(t *testing.T) {
 		},
 		{
 			desc: "preference users embedded acl",
-			client: &mqtt.Client{
-				Properties: mqtt.ClientProperties{
+			client: &clt.BaseClient{
+				Properties: clt.ClientProperties{
 					Username: []byte("mochi"),
 				},
 			},

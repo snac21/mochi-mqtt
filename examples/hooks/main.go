@@ -5,6 +5,7 @@
 package main
 
 import (
+	"github.com/mochi-mqtt/server/v2/client"
 	"bytes"
 	"fmt"
 	"log"
@@ -136,12 +137,12 @@ func (h *ExampleHook) Init(config any) error {
 }
 
 // subscribeCallback handles messages for subscribed topics
-func (h *ExampleHook) subscribeCallback(cl *mqtt.Client, sub packets.Subscription, pk packets.Packet) {
-	h.Log.Info("hook subscribed message", "client", cl.ID, "topic", pk.TopicName)
+func (h *ExampleHook) subscribeCallback(cl client.Client, sub packets.Subscription, pk packets.Packet) {
+	h.Log.Info("hook subscribed message", "client", cl.GetID(), "topic", pk.TopicName)
 }
 
-func (h *ExampleHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
-	h.Log.Info("client connected", "client", cl.ID)
+func (h *ExampleHook) OnConnect(cl client.Client, pk packets.Packet) error {
+	h.Log.Info("client connected", "client", cl.GetID())
 
 	// Example demonstrating how to subscribe to a topic within the hook.
 	h.config.Server.Subscribe("hook/direct/publish", 1, h.subscribeCallback)
@@ -155,35 +156,35 @@ func (h *ExampleHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
 	return nil
 }
 
-func (h *ExampleHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
+func (h *ExampleHook) OnDisconnect(cl client.Client, err error, expire bool) {
 	if err != nil {
-		h.Log.Info("client disconnected", "client", cl.ID, "expire", expire, "error", err)
+		h.Log.Info("client disconnected", "client", cl.GetID(), "expire", expire, "error", err)
 	} else {
-		h.Log.Info("client disconnected", "client", cl.ID, "expire", expire)
+		h.Log.Info("client disconnected", "client", cl.GetID(), "expire", expire)
 	}
 
 }
 
-func (h *ExampleHook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []byte) {
-	h.Log.Info(fmt.Sprintf("subscribed qos=%v", reasonCodes), "client", cl.ID, "filters", pk.Filters)
+func (h *ExampleHook) OnSubscribed(cl client.Client, pk packets.Packet, reasonCodes []byte) {
+	h.Log.Info(fmt.Sprintf("subscribed qos=%v", reasonCodes), "client", cl.GetID(), "filters", pk.Filters)
 }
 
-func (h *ExampleHook) OnUnsubscribed(cl *mqtt.Client, pk packets.Packet) {
-	h.Log.Info("unsubscribed", "client", cl.ID, "filters", pk.Filters)
+func (h *ExampleHook) OnUnsubscribed(cl client.Client, pk packets.Packet) {
+	h.Log.Info("unsubscribed", "client", cl.GetID(), "filters", pk.Filters)
 }
 
-func (h *ExampleHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
-	h.Log.Info("received from client", "client", cl.ID, "payload", string(pk.Payload))
+func (h *ExampleHook) OnPublish(cl client.Client, pk packets.Packet) (packets.Packet, error) {
+	h.Log.Info("received from client", "client", cl.GetID(), "payload", string(pk.Payload))
 
 	pkx := pk
 	if string(pk.Payload) == "hello" {
 		pkx.Payload = []byte("hello world")
-		h.Log.Info("received modified packet from client", "client", cl.ID, "payload", string(pkx.Payload))
+		h.Log.Info("received modified packet from client", "client", cl.GetID(), "payload", string(pkx.Payload))
 	}
 
 	return pkx, nil
 }
 
-func (h *ExampleHook) OnPublished(cl *mqtt.Client, pk packets.Packet) {
-	h.Log.Info("published to client", "client", cl.ID, "payload", string(pk.Payload))
+func (h *ExampleHook) OnPublished(cl client.Client, pk packets.Packet) {
+	h.Log.Info("published to client", "client", cl.GetID(), "payload", string(pk.Payload))
 }

@@ -5,6 +5,7 @@
 package redis
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"bytes"
 	"context"
 	"errors"
@@ -25,13 +26,13 @@ const defaultAddr = "localhost:6379"
 const defaultHPrefix = "mochi-"
 
 // clientKey returns a primary key for a client.
-func clientKey(cl *mqtt.Client) string {
-	return cl.ID
+func clientKey(cl clt.Client) string {
+	return cl.GetID()
 }
 
 // subscriptionKey returns a primary key for a subscription.
-func subscriptionKey(cl *mqtt.Client, filter string) string {
-	return cl.ID + ":" + filter
+func subscriptionKey(cl clt.Client, filter string) string {
+	return cl.GetID() + ":" + filter
 }
 
 // retainedKey returns a primary key for a retained message.
@@ -40,8 +41,8 @@ func retainedKey(topic string) string {
 }
 
 // inflightKey returns a primary key for an inflight message.
-func inflightKey(cl *mqtt.Client, pk packets.Packet) string {
-	return cl.ID + ":" + pk.FormatID()
+func inflightKey(cl clt.Client, pk packets.Packet) string {
+	return cl.GetID() + ":" + pk.FormatID()
 }
 
 // sysInfoKey returns a primary key for system info.
@@ -154,31 +155,31 @@ func (h *Hook) Stop() error {
 }
 
 // OnSessionEstablished adds a client to the store when their session is established.
-func (h *Hook) OnSessionEstablished(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnSessionEstablished(cl clt.Client, pk packets.Packet) {
 	h.updateClient(cl)
 }
 
 // OnWillSent is called when a client sends a Will Message and the Will Message is removed from the client record.
-func (h *Hook) OnWillSent(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnWillSent(cl clt.Client, pk packets.Packet) {
 	h.updateClient(cl)
 }
 
 // updateClient writes the client data to the store.
-func (h *Hook) updateClient(cl *mqtt.Client) {
+func (h *Hook) updateClient(cl clt.Client) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
 	}
 
-	props := cl.Properties.Props.Copy(false)
+	props := cl.GetProperties().Props.Copy(false)
 	in := &storage.Client{
 		ID:              clientKey(cl),
 		T:               storage.ClientKey,
-		Remote:          cl.Net.Remote,
-		Listener:        cl.Net.Listener,
-		Username:        cl.Properties.Username,
-		Clean:           cl.Properties.Clean,
-		ProtocolVersion: cl.Properties.ProtocolVersion,
+		Remote:          cl.GetConnection().Remote,
+		Listener:        cl.GetConnection().Listener,
+		Username:        cl.GetProperties().Username,
+		Clean:           cl.GetProperties().Clean,
+		ProtocolVersion: cl.GetProperties().ProtocolVersion,
 		Properties: storage.ClientProperties{
 			SessionExpiryInterval: props.SessionExpiryInterval,
 			AuthenticationMethod:  props.AuthenticationMethod,
@@ -190,7 +191,15 @@ func (h *Hook) updateClient(cl *mqtt.Client) {
 			User:                  props.User,
 			MaximumPacketSize:     props.MaximumPacketSize,
 		},
-		Will: storage.ClientWill(cl.Properties.Will),
+		Will: storage.ClientWill{
+			TopicName:         cl.GetProperties().Will.TopicName,
+			Payload:           cl.GetProperties().Will.Payload,
+			Qos:               cl.GetProperties().Will.Qos,
+			Retain:            cl.GetProperties().Will.Retain,
+			WillDelayInterval: cl.GetProperties().Will.WillDelayInterval,
+			User:              cl.GetProperties().Will.User,
+			Flag:              cl.GetProperties().Will.Flag,
+		},
 	}
 
 	err := h.db.HSet(h.ctx, h.hKey(storage.ClientKey), clientKey(cl), in).Err()
@@ -200,7 +209,7 @@ func (h *Hook) updateClient(cl *mqtt.Client) {
 }
 
 // OnDisconnect removes a client from the store if they were using a clean session.
-func (h *Hook) OnDisconnect(cl *mqtt.Client, _ error, expire bool) {
+func (h *Hook) OnDisconnect(cl clt.Client, _ error, expire bool) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
@@ -221,7 +230,7 @@ func (h *Hook) OnDisconnect(cl *mqtt.Client, _ error, expire bool) {
 }
 
 // OnSubscribed adds one or more client subscriptions to the store.
-func (h *Hook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []byte) {
+func (h *Hook) OnSubscribed(cl clt.Client, pk packets.Packet, reasonCodes []byte) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
@@ -232,7 +241,7 @@ func (h *Hook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []by
 		in = &storage.Subscription{
 			ID:                subscriptionKey(cl, pk.Filters[i].Filter),
 			T:                 storage.SubscriptionKey,
-			Client:            cl.ID,
+			Client:            cl.GetID(),
 			Qos:               reasonCodes[i],
 			Filter:            pk.Filters[i].Filter,
 			Identifier:        pk.Filters[i].Identifier,
@@ -249,7 +258,7 @@ func (h *Hook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []by
 }
 
 // OnUnsubscribed removes one or more client subscriptions from the store.
-func (h *Hook) OnUnsubscribed(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnUnsubscribed(cl clt.Client, pk packets.Packet) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
@@ -264,7 +273,7 @@ func (h *Hook) OnUnsubscribed(cl *mqtt.Client, pk packets.Packet) {
 }
 
 // OnRetainMessage adds a retained message for a topic to the store.
-func (h *Hook) OnRetainMessage(cl *mqtt.Client, pk packets.Packet, r int64) {
+func (h *Hook) OnRetainMessage(cl clt.Client, pk packets.Packet, r int64) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
@@ -287,7 +296,7 @@ func (h *Hook) OnRetainMessage(cl *mqtt.Client, pk packets.Packet, r int64) {
 		TopicName:   pk.TopicName,
 		Payload:     pk.Payload,
 		Created:     pk.Created,
-		Client:      cl.ID,
+		Client:      cl.GetID(),
 		Origin:      pk.Origin,
 		Properties: storage.MessageProperties{
 			PayloadFormat:          props.PayloadFormat,
@@ -308,7 +317,7 @@ func (h *Hook) OnRetainMessage(cl *mqtt.Client, pk packets.Packet, r int64) {
 }
 
 // OnQosPublish adds or updates an inflight message in the store.
-func (h *Hook) OnQosPublish(cl *mqtt.Client, pk packets.Packet, sent int64, resends int) {
+func (h *Hook) OnQosPublish(cl clt.Client, pk packets.Packet, sent int64, resends int) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
@@ -318,7 +327,7 @@ func (h *Hook) OnQosPublish(cl *mqtt.Client, pk packets.Packet, sent int64, rese
 	in := &storage.Message{
 		ID:          inflightKey(cl, pk),
 		T:           storage.InflightKey,
-		Client:      cl.ID,
+		Client:      cl.GetID(),
 		Origin:      pk.Origin,
 		FixedHeader: pk.FixedHeader,
 		TopicName:   pk.TopicName,
@@ -344,7 +353,7 @@ func (h *Hook) OnQosPublish(cl *mqtt.Client, pk packets.Packet, sent int64, rese
 }
 
 // OnQosComplete removes a resolved inflight message from the store.
-func (h *Hook) OnQosComplete(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnQosComplete(cl clt.Client, pk packets.Packet) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return
@@ -357,7 +366,7 @@ func (h *Hook) OnQosComplete(cl *mqtt.Client, pk packets.Packet) {
 }
 
 // OnQosDropped removes a dropped inflight message from the store.
-func (h *Hook) OnQosDropped(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnQosDropped(cl clt.Client, pk packets.Packet) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 	}
@@ -398,7 +407,7 @@ func (h *Hook) OnRetainedExpired(filter string) {
 }
 
 // OnClientExpired deleted expired clients from the store.
-func (h *Hook) OnClientExpired(cl *mqtt.Client) {
+func (h *Hook) OnClientExpired(cl clt.Client) {
 	if h.db == nil {
 		h.Log.Error("", "error", storage.ErrDBFileNotOpen)
 		return

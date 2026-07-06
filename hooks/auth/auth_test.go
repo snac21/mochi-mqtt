@@ -5,6 +5,7 @@
 package auth
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"log/slog"
 	"os"
 	"testing"
@@ -133,8 +134,8 @@ func TestOnConnectAuthenticate(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, h.OnConnectAuthenticate(
-		&mqtt.Client{
-			Properties: mqtt.ClientProperties{
+		&clt.BaseClient{
+			Properties: clt.ClientProperties{
 				Username: []byte("mochi"),
 			},
 		},
@@ -142,8 +143,8 @@ func TestOnConnectAuthenticate(t *testing.T) {
 	))
 
 	require.False(t, h.OnConnectAuthenticate(
-		&mqtt.Client{
-			Properties: mqtt.ClientProperties{
+		&clt.BaseClient{
+			Properties: clt.ClientProperties{
 				Username: []byte("mochi"),
 			},
 		},
@@ -151,7 +152,7 @@ func TestOnConnectAuthenticate(t *testing.T) {
 	))
 
 	require.False(t, h.OnConnectAuthenticate(
-		&mqtt.Client{},
+		&clt.BaseClient{},
 		packets.Packet{},
 	))
 }
@@ -172,8 +173,8 @@ func TestOnACL(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, h.OnACLCheck(
-		&mqtt.Client{
-			Properties: mqtt.ClientProperties{
+		&clt.BaseClient{
+			Properties: clt.ClientProperties{
 				Username: []byte("mochi"),
 			},
 		},
@@ -182,8 +183,8 @@ func TestOnACL(t *testing.T) {
 	))
 
 	require.False(t, h.OnACLCheck(
-		&mqtt.Client{
-			Properties: mqtt.ClientProperties{
+		&clt.BaseClient{
+			Properties: clt.ClientProperties{
 				Username: []byte("mochi"),
 			},
 		},
@@ -192,8 +193,8 @@ func TestOnACL(t *testing.T) {
 	))
 
 	require.True(t, h.OnACLCheck(
-		&mqtt.Client{
-			Properties: mqtt.ClientProperties{
+		&clt.BaseClient{
+			Properties: clt.ClientProperties{
 				Username: []byte("mochi"),
 			},
 		},
@@ -202,8 +203,8 @@ func TestOnACL(t *testing.T) {
 	))
 
 	require.False(t, h.OnACLCheck(
-		&mqtt.Client{
-			Properties: mqtt.ClientProperties{
+		&clt.BaseClient{
+			Properties: clt.ClientProperties{
 				Username: []byte("mochi"),
 			},
 		},

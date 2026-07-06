@@ -5,6 +5,7 @@
 package debug
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -77,47 +78,47 @@ func (h *Hook) OnStopped() {
 }
 
 // OnPacketRead is called when a new packet is received from a client.
-func (h *Hook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
+func (h *Hook) OnPacketRead(cl clt.Client, pk packets.Packet) (packets.Packet, error) {
 	if (pk.FixedHeader.Type == packets.Pingresp || pk.FixedHeader.Type == packets.Pingreq) && !h.config.ShowPings {
 		return pk, nil
 	}
 
-	h.Log.Debug(fmt.Sprintf("%s << %s", strings.ToUpper(packets.PacketNames[pk.FixedHeader.Type]), cl.ID), "m", h.packetMeta(pk))
+	h.Log.Debug(fmt.Sprintf("%s << %s", strings.ToUpper(packets.PacketNames[pk.FixedHeader.Type]), cl.GetID()), "m", h.packetMeta(pk))
 	return pk, nil
 }
 
 // OnPacketSent is called when a packet is sent to a client.
-func (h *Hook) OnPacketSent(cl *mqtt.Client, pk packets.Packet, b []byte) {
+func (h *Hook) OnPacketSent(cl clt.Client, pk packets.Packet, b []byte) {
 	if (pk.FixedHeader.Type == packets.Pingresp || pk.FixedHeader.Type == packets.Pingreq) && !h.config.ShowPings {
 		return
 	}
 
-	h.Log.Debug(fmt.Sprintf("%s >> %s", strings.ToUpper(packets.PacketNames[pk.FixedHeader.Type]), cl.ID), "m", h.packetMeta(pk))
+	h.Log.Debug(fmt.Sprintf("%s >> %s", strings.ToUpper(packets.PacketNames[pk.FixedHeader.Type]), cl.GetID()), "m", h.packetMeta(pk))
 }
 
 // OnRetainMessage is called when a published message is retained (or retain deleted/modified).
-func (h *Hook) OnRetainMessage(cl *mqtt.Client, pk packets.Packet, r int64) {
+func (h *Hook) OnRetainMessage(cl clt.Client, pk packets.Packet, r int64) {
 	h.Log.Debug("retained message on topic", "m", h.packetMeta(pk))
 }
 
 // OnQosPublish is called when a publish packet with Qos is issued to a subscriber.
-func (h *Hook) OnQosPublish(cl *mqtt.Client, pk packets.Packet, sent int64, resends int) {
+func (h *Hook) OnQosPublish(cl clt.Client, pk packets.Packet, sent int64, resends int) {
 	h.Log.Debug("inflight out", "m", h.packetMeta(pk))
 }
 
 // OnQosComplete is called when the Qos flow for a message has been completed.
-func (h *Hook) OnQosComplete(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnQosComplete(cl clt.Client, pk packets.Packet) {
 	h.Log.Debug("inflight complete", "m", h.packetMeta(pk))
 }
 
 // OnQosDropped is called the Qos flow for a message expires.
-func (h *Hook) OnQosDropped(cl *mqtt.Client, pk packets.Packet) {
+func (h *Hook) OnQosDropped(cl clt.Client, pk packets.Packet) {
 	h.Log.Debug("inflight dropped", "m", h.packetMeta(pk))
 }
 
 // OnLWTSent is called when a Will Message has been issued from a disconnecting client.
-func (h *Hook) OnLWTSent(cl *mqtt.Client, pk packets.Packet) {
-	h.Log.Debug("sent lwt for client", "method", "OnLWTSent", "client", cl.ID)
+func (h *Hook) OnLWTSent(cl clt.Client, pk packets.Packet) {
+	h.Log.Debug("sent lwt for client", "method", "OnLWTSent", "client", cl.GetID())
 }
 
 // OnRetainedExpired is called when the server clears expired retained messages.
@@ -126,8 +127,8 @@ func (h *Hook) OnRetainedExpired(filter string) {
 }
 
 // OnClientExpired is called when the server clears an expired client.
-func (h *Hook) OnClientExpired(cl *mqtt.Client) {
-	h.Log.Debug("client session expired", "method", "OnClientExpired", "client", cl.ID)
+func (h *Hook) OnClientExpired(cl clt.Client) {
+	h.Log.Debug("client session expired", "method", "OnClientExpired", "client", cl.GetID())
 }
 
 // StoredClients is called when the server restores clients from a store.

@@ -5,6 +5,7 @@
 package auth
 
 import (
+	clt "github.com/mochi-mqtt/server/v2/client"
 	"testing"
 
 	"github.com/mochi-mqtt/server/v2"
@@ -26,10 +27,10 @@ func TestAllowAllProvides(t *testing.T) {
 
 func TestAllowAllOnConnectAuthenticate(t *testing.T) {
 	h := new(AllowHook)
-	require.True(t, h.OnConnectAuthenticate(new(mqtt.Client), packets.Packet{}))
+	require.True(t, h.OnConnectAuthenticate(new(clt.BaseClient), packets.Packet{}))
 }
 
 func TestAllowAllOnACLCheck(t *testing.T) {
 	h := new(AllowHook)
-	require.True(t, h.OnACLCheck(new(mqtt.Client), "any", true))
+	require.True(t, h.OnACLCheck(new(clt.BaseClient), "any", true))
 }
