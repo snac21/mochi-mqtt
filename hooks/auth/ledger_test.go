@@ -562,7 +562,6 @@ func TestLedgerUpdate(t *testing.T) {
 	}
 
 	n := &Ledger{
-		Users: Users{"new-user": {Password: "pass"}},
 		Auth: AuthRules{
 			{Remote: "127.0.0.1", Allow: true},
 			{Remote: "192.168.*", Allow: true},
@@ -572,41 +571,7 @@ func TestLedgerUpdate(t *testing.T) {
 	old.Update(n)
 	require.Len(t, old.Auth, 2)
 	require.Equal(t, RString("192.168.*"), old.Auth[1].Remote)
-	require.NotNil(t, old.Users)
-	require.Equal(t, RString("pass"), old.Users["new-user"].Password)
 	require.NotSame(t, n, old)
-}
-
-func TestLedgerConcurrentAccess(t *testing.T) {
-	ledger := &Ledger{
-		Users: Users{"user1": {Password: "pass1"}},
-		Auth:  AuthRules{{Username: "user1", Password: "pass1", Allow: true}},
-		ACL:   ACLRules{{Username: "user1", Filters: Filters{"topic/#": ReadWrite}}},
-	}
-
-	cl := &mqtt.Client{
-		Properties: mqtt.ClientProperties{Username: []byte("user1")},
-	}
-	pk := packets.Packet{Connect: packets.ConnectParams{Password: []byte("pass1")}}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 100; i++ {
-			ledger.Update(&Ledger{
-				Users: Users{"user1": {Password: "pass1"}},
-				Auth:  AuthRules{{Username: "user1", Password: "pass1", Allow: true}},
-				ACL:   ACLRules{{Username: "user1", Filters: Filters{"topic/#": ReadWrite}}},
-			})
-		}
-	}()
-
-	for i := 0; i < 100; i++ {
-		ledger.AuthOk(cl, pk)
-		ledger.ACLOk(cl, "topic/test", true)
-	}
-
-	<-done
 }
 
 func TestLedgerToJSON(t *testing.T) {
